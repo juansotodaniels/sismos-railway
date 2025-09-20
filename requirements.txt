@@ -1,0 +1,11 @@
+requests
+beautifulsoup4
+lxml
+pandas
+numpy
+SQLAlchemy
+mysql-connector-python
+scikit-learn
+joblib
+fastapi
+uvicorn
