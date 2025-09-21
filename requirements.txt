@@ -6,3 +6,4 @@ numpy
 SQLAlchemy
 mysql-connector-python
 joblib
+scikit-learn
