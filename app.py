@@ -29,7 +29,7 @@ MODEL_DOWNLOAD_TIMEOUT = int(os.getenv("MODEL_DOWNLOAD_TIMEOUT", "600"))
 BASE_URL = "https://www.sismologia.cl/"
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; RailwayBot/1.0; +https://railway.app)"}
 
-CSV_PATH = os.getenv("LOCALIDADES_CSV", "Localidades_Enero_2026_con_coords_region_comuna.csv")
+CSV_PATH = os.getenv("LOCALIDADES_CSV", "Localidades_Enero_2026_con_coords.csv")
 
 MODEL_PATH = os.getenv("MODEL_PATH", "Sismos_RF_joblib_Ene_2026.pkl")
 MODEL_URL = os.getenv(
