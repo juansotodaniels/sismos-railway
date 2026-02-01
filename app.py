@@ -374,17 +374,11 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
               <li><b>Profundidad (km):</b> {evento["Profundidad"]}</li>
               <li><b>Magnitud:</b> {evento["magnitud"]}</li>
               <li><b>Referencia:</b> {ref}</li>
-              <li><b>Informes revisados:</b> {evento.get("informes_revisados", "-")}</li>
             </ul>
             <p><b>Fuente:</b> <a href="{evento["Fuente_informe"]}" target="_blank">{evento["Fuente_informe"]}</a></p>
 
             <hr/>
             <h2>Intensidades estimadas (solo ≥ {MIN_INTENSITY_TO_SHOW})</h2>
-            <p>
-              ✅ Intensidades redondeadas al entero más cercano<br/>
-              ✅ Filtro: intensidad ≥ <b>{MIN_INTENSITY_TO_SHOW}</b><br/>
-              Features usadas (orden): <code>{", ".join(order)}</code>
-            </p>
 
             {table_html}
 
