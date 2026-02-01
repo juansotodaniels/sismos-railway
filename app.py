@@ -14,7 +14,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 # ============================================================
 # CONFIGURACIÓN (MODIFICABLE)
 # ============================================================
-MIN_EVENT_MAGNITUDE = 0.0       # <-- SOLO toma sismos con magnitud >= esto
+MIN_EVENT_MAGNITUDE = 0         # <-- SOLO toma sismos con magnitud >= esto
 MIN_INTENSITY_TO_SHOW = 2       # <-- SOLO muestra localidades con intensidad >= esto
 MAX_EVENTS_TO_SCAN = 25         # <-- cuántos informes recientes revisar para encontrar uno que cumpla
 # ============================================================
