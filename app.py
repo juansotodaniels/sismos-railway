@@ -417,7 +417,7 @@ def intensidades_only(n: int = Query(200, ge=1, le=20000)):
         <html>
           <head><meta charset="utf-8"><title>Intensidades</title></head>
           <body style="font-family: Arial, sans-serif; padding: 24px;">
-            <h2>Intensidades (solo mayores o iguales a {MIN_INTENSITY_TO_SHOW})</h2>
+            <h2>Intensidades (mayores o iguales a {MIN_INTENSITY_TO_SHOW})</h2>
             <p><b>Referencia:</b> {ref}</p>
             <p>Features: <code>{", ".join(order)}</code></p>
             {table_html}
