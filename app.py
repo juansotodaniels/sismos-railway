@@ -25,7 +25,6 @@ MODEL_URL = os.getenv(
 
 app = FastAPI(title="Último sismo + distancias + intensidades (RF)")
 
-
 # -------------------------
 # Utilidades
 # -------------------------
@@ -68,77 +67,6 @@ def round_intensity(x) -> int:
     except Exception:
         return 0
 
-
-# -------------------------
-# Scraping: último sismo
-# -------------------------
-def fetch_latest_event() -> dict:
-    r = requests.get(BASE_URL, headers=HEADERS, timeout=20)
-    r.raise_for_status()
-    soup = BeautifulSoup(r.text, "html.parser")
-
-    first = soup.select_one('a[href^="sismicidad/informes/"]')
-    if not first:
-        first = soup.find("a", href=re.compile(r"sismicidad/informes/"))
-    if not first:
-        raise RuntimeError("No se encontró link al informe del último sismo en la portada.")
-
-    informe_url = BASE_URL.rstrip("/") + "/" + first["href"].lstrip("/")
-
-    r2 = requests.get(informe_url, headers=HEADERS, timeout=20)
-    r2.raise_for_status()
-    soup2 = BeautifulSoup(r2.text, "html.parser")
-
-    # Texto “plano” para regex numéricas
-    text = soup2.get_text("\n", strip=True)
-
-    lat_m = re.search(r"Latitud\s*([-+]?\d+(?:[.,]\d+)?)", text)
-    lon_m = re.search(r"Longitud\s*([-+]?\d+(?:[.,]\d+)?)", text)
-    prof_m = re.search(r"Profundidad\s*(\d+(?:[.,]\d+)?)\s*km", text, re.IGNORECASE)
-    mag_m = re.search(r"Magnitud\s*([-+]?\d+(?:[.,]\d+)?)", text)
-
-    if not (lat_m and lon_m and prof_m and mag_m):
-        raise RuntimeError("No se pudieron extraer todos los campos (lat/lon/prof/mag).")
-
-    # -------------------------
-    # NUEVO: Extraer "Referencia"
-    # -------------------------
-    # Intento 1: regex exacto "Referencia ..."
-    ref = None
-    ref_m = re.search(r"Referencia\s*[:\-]?\s*(.+)", text, re.IGNORECASE)
-    if ref_m:
-        ref = ref_m.group(1).strip()
-
-    # Intento 2 (fallback): a veces el sitio usa otro label
-    # (ajusta/expande si en tu informe aparece con otro nombre)
-    if not ref:
-        alt_labels = [
-            "Referencia geográfica",
-            "Referencias",
-            "Región",
-            "Lugar",
-            "Ubicación",
-            "Localidad",
-        ]
-        for lbl in alt_labels:
-            m = re.search(rf"{re.escape(lbl)}\s*[:\-]?\s*(.+)", text, re.IGNORECASE)
-            if m:
-                ref = m.group(1).strip()
-                break
-
-    # Limpieza mínima: corta si viene con saltos raros pegados
-    if ref:
-        # Si por algún motivo quedó con más de una línea pegada, toma la primera
-        ref = ref.split("\n")[0].strip()
-
-    return {
-        "Latitud_sismo": _to_float(lat_m.group(1)),
-        "Longitud_sismo": _to_float(lon_m.group(1)),
-        "Profundidad": _to_float(prof_m.group(1)),
-        "magnitud": _to_float(mag_m.group(1)),
-        "Referencia": ref,  # ✅ NUEVO CAMPO
-        "Fuente_informe": informe_url,
-    }
 
 # -------------------------
 # Lectura CSV: localidades
@@ -187,6 +115,72 @@ def read_localidades(csv_path: str) -> list[dict]:
     if not locs:
         raise RuntimeError("No se pudieron leer localidades válidas desde el CSV.")
     return locs
+
+
+def referencia_por_localidad_mas_cercana(evento: dict, locs: list[dict]) -> str | None:
+    """Genera una 'Referencia' robusta: distancia + localidad más cercana."""
+    lat_s = evento["Latitud_sismo"]
+    lon_s = evento["Longitud_sismo"]
+
+    best_loc = None
+    best_d = float("inf")
+
+    for loc in locs:
+        d = haversine_km(lat_s, lon_s, loc["Latitud_localidad"], loc["Longitud_localidad"])
+        if d < best_d:
+            best_d = d
+            best_loc = loc["localidad"]
+
+    if best_loc is None:
+        return None
+
+    return f"{round(best_d, 1)} km de {best_loc}"
+
+
+# -------------------------
+# Scraping: último sismo
+# -------------------------
+def fetch_latest_event() -> dict:
+    r = requests.get(BASE_URL, headers=HEADERS, timeout=20)
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, "html.parser")
+
+    first = soup.select_one('a[href^="sismicidad/informes/"]')
+    if not first:
+        first = soup.find("a", href=re.compile(r"sismicidad/informes/"))
+    if not first:
+        raise RuntimeError("No se encontró link al informe del último sismo en la portada.")
+
+    informe_url = BASE_URL.rstrip("/") + "/" + first["href"].lstrip("/")
+
+    r2 = requests.get(informe_url, headers=HEADERS, timeout=20)
+    r2.raise_for_status()
+    text = BeautifulSoup(r2.text, "html.parser").get_text("\n", strip=True)
+
+    lat_m = re.search(r"Latitud\s*([-+]?\d+(?:[.,]\d+)?)", text)
+    lon_m = re.search(r"Longitud\s*([-+]?\d+(?:[.,]\d+)?)", text)
+    prof_m = re.search(r"Profundidad\s*(\d+(?:[.,]\d+)?)\s*km", text, re.IGNORECASE)
+    mag_m = re.search(r"Magnitud\s*([-+]?\d+(?:[.,]\d+)?)", text)
+
+    if not (lat_m and lon_m and prof_m and mag_m):
+        raise RuntimeError("No se pudieron extraer todos los campos (lat/lon/prof/mag).")
+
+    evento = {
+        "Latitud_sismo": _to_float(lat_m.group(1)),
+        "Longitud_sismo": _to_float(lon_m.group(1)),
+        "Profundidad": _to_float(prof_m.group(1)),
+        "magnitud": _to_float(mag_m.group(1)),
+        "Fuente_informe": informe_url,
+    }
+
+    # ✅ Referencia calculada: localidad más cercana
+    try:
+        locs = read_localidades(CSV_PATH)
+        evento["Referencia"] = referencia_por_localidad_mas_cercana(evento, locs)
+    except Exception:
+        evento["Referencia"] = None
+
+    return evento
 
 
 # -------------------------
@@ -276,16 +270,11 @@ def predict_intensidades(evento: dict):
 
     out = []
     for i, m in enumerate(meta):
-        # ✅ redondeo al entero más cercano
         intensidad = round_intensity(y_pred[i])
-
-        # ✅ filtrar intensidades <= 0
         if intensidad <= 0:
             continue
-
         out.append({**m, "intensidad_predicha": intensidad})
 
-    # ordenar: primero por mayor intensidad, y a igual intensidad por menor distancia
     out.sort(key=lambda x: (-x["intensidad_predicha"], x["distancia_epicentro_km"]))
     return out, order
 
@@ -296,6 +285,7 @@ def predict_intensidades(evento: dict):
 @app.get("/", response_class=HTMLResponse)
 def home():
     d = fetch_latest_event()
+    ref = d.get("Referencia") or "No disponible"
     html = f"""
     <html>
       <head><meta charset="utf-8"><title>Último sismo</title></head>
@@ -306,6 +296,7 @@ def home():
           <li><b>Longitud_sismo:</b> {d["Longitud_sismo"]}</li>
           <li><b>Profundidad (km):</b> {d["Profundidad"]}</li>
           <li><b>Magnitud:</b> {d["magnitud"]}</li>
+          <li><b>Referencia:</b> {ref}</li>
         </ul>
         <p><b>Fuente:</b> <a href="{d["Fuente_informe"]}" target="_blank">{d["Fuente_informe"]}</a></p>
         <hr/>
@@ -337,6 +328,8 @@ def intensidades_html(n: int = Query(200, ge=1, le=20000)):
         for i, x in enumerate(show)
     )
 
+    ref = evento.get("Referencia") or "No disponible"
+
     html = f"""
     <html>
       <head><meta charset="utf-8"><title>Intensidades por localidad</title></head>
@@ -344,7 +337,8 @@ def intensidades_html(n: int = Query(200, ge=1, le=20000)):
         <h2>Intensidad estimada por localidad (modelo RF)</h2>
         <p>
           <b>Sismo:</b> lat {evento["Latitud_sismo"]}, lon {evento["Longitud_sismo"]},
-          prof {evento["Profundidad"]} km, M {evento["magnitud"]}
+          prof {evento["Profundidad"]} km, M {evento["magnitud"]}<br/>
+          <b>Referencia:</b> {ref}
           (<a href="{evento["Fuente_informe"]}" target="_blank">fuente</a>)
         </p>
         <p>
@@ -421,3 +415,4 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8000"))
     uvicorn.run("app:app", host="0.0.0.0", port=port)
+
