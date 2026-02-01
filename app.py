@@ -68,8 +68,14 @@ def round_intensity(x) -> int:
         return 0
 
 
+def _clean_txt(x) -> str:
+    if x is None:
+        return ""
+    return str(x).strip()
+
+
 # -------------------------
-# Lectura CSV: localidades
+# Lectura CSV: localidades (ahora incluye comuna/región si existen)
 # -------------------------
 def read_localidades(csv_path: str) -> list[dict]:
     if not os.path.exists(csv_path):
@@ -87,16 +93,20 @@ def read_localidades(csv_path: str) -> list[dict]:
         fields = [c.strip() for c in reader.fieldnames]
         fields_lower = [c.lower() for c in fields]
 
-        def find_col(candidates):
+        def find_col_contains(candidates):
             for cand in candidates:
                 for i, col in enumerate(fields_lower):
                     if cand in col:
                         return fields[i]
             return None
 
-        lat_col = find_col(["lat", "latitude", "latitud"])
-        lon_col = find_col(["lon", "long", "longitude", "longitud"])
-        name_col = find_col(["localidad", "nombre", "name", "ciudad", "comuna", "poblado", "locality"]) or fields[0]
+        lat_col = find_col_contains(["lat", "latitude", "latitud"])
+        lon_col = find_col_contains(["lon", "long", "longitude", "longitud"])
+        name_col = find_col_contains(["localidad", "nombre", "name", "ciudad", "poblado", "locality"]) or fields[0]
+
+        # NUEVO: detectar comuna y región (si están en el CSV)
+        comuna_col = find_col_contains(["comuna", "municip", "municipio"])
+        region_col = find_col_contains(["región", "region", "region_nombre", "regionname"])
 
         if not lat_col or not lon_col:
             raise RuntimeError(f"No pude identificar columnas de lat/lon en el CSV. Headers: {fields}")
@@ -109,8 +119,19 @@ def read_localidades(csv_path: str) -> list[dict]:
             except Exception:
                 continue
 
-            nombre = (row.get(name_col) or "").strip() or "Sin nombre"
-            locs.append({"localidad": nombre, "Latitud_localidad": lat, "Longitud_localidad": lon})
+            nombre = _clean_txt(row.get(name_col)) or "Sin nombre"
+            comuna = _clean_txt(row.get(comuna_col)) if comuna_col else ""
+            region = _clean_txt(row.get(region_col)) if region_col else ""
+
+            locs.append(
+                {
+                    "localidad": nombre,
+                    "Latitud_localidad": lat,
+                    "Longitud_localidad": lon,
+                    "comuna": comuna,
+                    "region": region,
+                }
+            )
 
     if not locs:
         raise RuntimeError("No se pudieron leer localidades válidas desde el CSV.")
@@ -118,23 +139,29 @@ def read_localidades(csv_path: str) -> list[dict]:
 
 
 def referencia_por_localidad_mas_cercana(evento: dict, locs: list[dict]) -> str | None:
-    """Genera una 'Referencia' robusta: distancia + localidad más cercana."""
+    """
+    Genera 'Referencia' robusta:
+    "{dist} km de {localidad} (Comuna: X, Región: Y)"
+    """
     lat_s = evento["Latitud_sismo"]
     lon_s = evento["Longitud_sismo"]
 
-    best_loc = None
+    best = None
     best_d = float("inf")
 
     for loc in locs:
         d = haversine_km(lat_s, lon_s, loc["Latitud_localidad"], loc["Longitud_localidad"])
         if d < best_d:
             best_d = d
-            best_loc = loc["localidad"]
+            best = loc
 
-    if best_loc is None:
+    if best is None:
         return None
 
-    return f"{round(best_d, 1)} km de {best_loc}"
+    comuna = best.get("comuna") or "No disponible"
+    region = best.get("region") or "No disponible"
+
+    return f"{round(best_d, 1)} km de {best['localidad']} (Comuna: {comuna}, Región: {region})"
 
 
 # -------------------------
@@ -173,7 +200,7 @@ def fetch_latest_event() -> dict:
         "Fuente_informe": informe_url,
     }
 
-    # ✅ Referencia calculada: localidad más cercana
+    # ✅ Referencia calculada: localidad más cercana + comuna + región
     try:
         locs = read_localidades(CSV_PATH)
         evento["Referencia"] = referencia_por_localidad_mas_cercana(evento, locs)
@@ -249,6 +276,8 @@ def build_feature_matrix(evento: dict, locs: list[dict]):
         meta.append(
             {
                 "localidad": loc["localidad"],
+                "comuna": loc.get("comuna", ""),
+                "region": loc.get("region", ""),
                 "Latitud_localidad": loc["Latitud_localidad"],
                 "Longitud_localidad": loc["Longitud_localidad"],
                 "distancia_epicentro_km": round(dist, 2),
@@ -323,8 +352,8 @@ def intensidades_html(n: int = Query(200, ge=1, le=20000)):
 
     show = preds[:n]
     rows = "\n".join(
-        f"<tr><td>{i+1}</td><td>{x['localidad']}</td><td>{x['distancia_epicentro_km']}</td>"
-        f"<td><b>{x['intensidad_predicha']}</b></td><td>{x['Latitud_localidad']}</td><td>{x['Longitud_localidad']}</td></tr>"
+        f"<tr><td>{i+1}</td><td>{x['localidad']}</td><td>{x.get('comuna','')}</td><td>{x.get('region','')}</td>"
+        f"<td>{x['distancia_epicentro_km']}</td><td><b>{x['intensidad_predicha']}</b></td></tr>"
         for i, x in enumerate(show)
     )
 
@@ -353,10 +382,10 @@ def intensidades_html(n: int = Query(200, ge=1, le=20000)):
             <tr>
               <th>#</th>
               <th>Localidad</th>
+              <th>Comuna</th>
+              <th>Región</th>
               <th>Distancia (km)</th>
               <th>Intensidad (pred)</th>
-              <th>Lat</th>
-              <th>Lon</th>
             </tr>
           </thead>
           <tbody>{rows}</tbody>
@@ -415,4 +444,3 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8000"))
     uvicorn.run("app:app", host="0.0.0.0", port=port)
-
