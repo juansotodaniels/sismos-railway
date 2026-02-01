@@ -2,7 +2,12 @@ import os
 import re
 import csv
 import math
+import urllib.request
+
 import requests
+import numpy as np
+import joblib
+
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -12,9 +17,21 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; RailwayBot/1.0; +https://rail
 
 CSV_PATH = os.getenv("LOCALIDADES_CSV", "Localidades_Enero_2026_con_coords.csv")
 
-app = FastAPI(title="Último sismo + distancias a localidades")
+# El modelo se guardará localmente en el contenedor con este nombre
+MODEL_PATH = os.getenv("MODEL_PATH", "Sismos_RF_joblib_Ene_2026.pkl")
+
+# Link directo a descarga (Google Drive)
+MODEL_URL = os.getenv(
+    "MODEL_URL",
+    "https://drive.google.com/uc?export=download&id=198obnKfjpyomMDD4DivcooQUulv5eZGX"
+)
+
+app = FastAPI(title="Último sismo + distancias + intensidades (RF)")
 
 
+# -------------------------
+# Utilidades
+# -------------------------
 def _to_float(s: str) -> float:
     s = str(s).strip().replace(",", ".")
     return float(s)
@@ -36,8 +53,18 @@ def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return R * c
 
 
+def detect_delimiter(sample_text: str) -> str:
+    try:
+        dialect = csv.Sniffer().sniff(sample_text, delimiters=";,\t|")
+        return dialect.delimiter
+    except Exception:
+        return ";"
+
+
+# -------------------------
+# Scraping último sismo
+# -------------------------
 def fetch_latest_event() -> dict:
-    # 1) Portada: sacar el primer link al informe
     r = requests.get(BASE_URL, headers=HEADERS, timeout=20)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
@@ -50,7 +77,6 @@ def fetch_latest_event() -> dict:
 
     informe_url = BASE_URL.rstrip("/") + "/" + first["href"].lstrip("/")
 
-    # 2) Abrir informe y extraer campos
     r2 = requests.get(informe_url, headers=HEADERS, timeout=20)
     r2.raise_for_status()
     text = BeautifulSoup(r2.text, "html.parser").get_text("\n", strip=True)
@@ -66,37 +92,28 @@ def fetch_latest_event() -> dict:
     return {
         "Latitud_sismo": _to_float(lat_m.group(1)),
         "Longitud_sismo": _to_float(lon_m.group(1)),
-        "Profundidad_km": _to_float(prof_m.group(1)),
-        "Magnitud": _to_float(mag_m.group(1)),
+        "Profundidad": _to_float(prof_m.group(1)),
+        "magnitud": _to_float(mag_m.group(1)),
         "Fuente_informe": informe_url,
     }
 
 
-def detect_delimiter(sample_text: str) -> str:
-    # intenta detectar delimitador; fallback ';'
-    try:
-        dialect = csv.Sniffer().sniff(sample_text, delimiters=";,\t|")
-        return dialect.delimiter
-    except Exception:
-        return ";"
-
-
+# -------------------------
+# Lectura localidades
+# -------------------------
 def read_localidades(csv_path: str) -> list[dict]:
     if not os.path.exists(csv_path):
         raise RuntimeError(f"No existe el archivo CSV de localidades en: {csv_path}")
 
-    # leer una muestra para detectar delimitador
     with open(csv_path, "r", encoding="utf-8", errors="replace") as f:
         sample = f.read(4096)
     delim = detect_delimiter(sample)
 
-    # cargar CSV completo
     with open(csv_path, "r", encoding="utf-8", errors="replace", newline="") as f:
         reader = csv.DictReader(f, delimiter=delim)
         if not reader.fieldnames:
             raise RuntimeError("El CSV no tiene encabezados (headers).")
 
-        # buscar columnas lat/lon por nombre flexible
         fields = [c.strip() for c in reader.fieldnames]
         fields_lower = [c.lower() for c in fields]
 
@@ -109,59 +126,136 @@ def read_localidades(csv_path: str) -> list[dict]:
 
         lat_col = find_col(["lat", "latitude", "latitud"])
         lon_col = find_col(["lon", "long", "longitude", "longitud"])
-        # para el nombre de localidad, intenta varias opciones
         name_col = find_col(["localidad", "nombre", "name", "ciudad", "comuna", "poblado", "locality"]) or fields[0]
 
         if not lat_col or not lon_col:
             raise RuntimeError(
-                f"No pude identificar columnas de lat/lon en el CSV. "
-                f"Headers detectados: {fields}"
+                f"No pude identificar columnas de lat/lon en el CSV. Headers detectados: {fields}"
             )
 
-        localidades = []
+        locs = []
         for row in reader:
-            # ignora filas vacías
-            if row is None:
-                continue
             try:
                 lat = _to_float(row.get(lat_col, ""))
                 lon = _to_float(row.get(lon_col, ""))
             except Exception:
-                # si una fila viene mala, la saltamos
                 continue
 
-            nombre = (row.get(name_col) or "").strip()
-            if not nombre:
-                nombre = "Sin nombre"
+            nombre = (row.get(name_col) or "").strip() or "Sin nombre"
+            locs.append({"localidad": nombre, "Latitud_localidad": lat, "Longitud_localidad": lon})
 
-            localidades.append({"localidad": nombre, "lat": lat, "lon": lon})
-
-    if not localidades:
+    if not locs:
         raise RuntimeError("No se pudieron leer localidades válidas desde el CSV.")
-    return localidades
+    return locs
 
 
-def compute_distancias(evento: dict) -> list[dict]:
-    locs = read_localidades(CSV_PATH)
+# -------------------------
+# Modelo (descarga + cache)
+# -------------------------
+MODEL = None
+
+
+def ensure_model():
+    """
+    Descarga el modelo desde Google Drive si no existe en el filesystem del contenedor.
+    """
+    if not os.path.exists(MODEL_PATH):
+        print(f"[MODEL] No existe {MODEL_PATH}. Descargando desde Google Drive...")
+        # Descarga directa
+        urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
+        print("[MODEL] Modelo descargado correctamente.")
+
+
+def load_model():
+    global MODEL
+    if MODEL is None:
+        ensure_model()
+        MODEL = joblib.load(MODEL_PATH)
+        print("[MODEL] Modelo cargado en memoria.")
+    return MODEL
+
+
+FEATURES = [
+    "Latitud_sismo",
+    "Longitud_sismo",
+    "Profundidad",
+    "magnitud",
+    "Latitud_localidad",
+    "Longitud_localidad",
+    "distancia_epicentro",
+]
+
+
+def build_feature_matrix(evento: dict, locs: list[dict]):
     lat_s = evento["Latitud_sismo"]
     lon_s = evento["Longitud_sismo"]
 
-    out = []
+    rows = []
+    meta = []
     for loc in locs:
-        d_km = haversine_km(lat_s, lon_s, loc["lat"], loc["lon"])
-        out.append(
+        dist = haversine_km(lat_s, lon_s, loc["Latitud_localidad"], loc["Longitud_localidad"])
+
+        feats = {
+            "Latitud_sismo": lat_s,
+            "Longitud_sismo": lon_s,
+            "Profundidad": evento["Profundidad"],
+            "magnitud": evento["magnitud"],
+            "Latitud_localidad": loc["Latitud_localidad"],
+            "Longitud_localidad": loc["Longitud_localidad"],
+            "distancia_epicentro": dist,
+        }
+
+        rows.append(feats)
+        meta.append(
             {
                 "localidad": loc["localidad"],
-                "latitud": loc["lat"],
-                "longitud": loc["lon"],
-                "distancia_km": round(d_km, 2),
+                "Latitud_localidad": loc["Latitud_localidad"],
+                "Longitud_localidad": loc["Longitud_localidad"],
+                "distancia_epicentro_km": round(dist, 2),
             }
         )
 
-    out.sort(key=lambda x: x["distancia_km"])
-    return out
+    model = load_model()
+
+    # Respetar orden de features si el modelo lo trae (sklearn)
+    if hasattr(model, "feature_names_in_"):
+        order = list(model.feature_names_in_)
+    else:
+        order = FEATURES
+
+    X = np.array([[float(r.get(c, np.nan)) for c in order] for r in rows], dtype=float)
+    return X, meta, order
 
 
+def predict_intensidades(evento: dict):
+    locs = read_localidades(CSV_PATH)
+    X, meta, order = build_feature_matrix(evento, locs)
+
+    model = load_model()
+    y_pred = model.predict(X)
+
+    out = []
+    for i, m in enumerate(meta):
+        pred_val = y_pred[i]
+        try:
+            pred_val = float(pred_val)
+        except Exception:
+            pred_val = str(pred_val)
+
+        out.append(
+            {
+                **m,
+                "intensidad_predicha": pred_val,
+            }
+        )
+
+    out.sort(key=lambda x: x["distancia_epicentro_km"])
+    return out, order
+
+
+# -------------------------
+# Endpoints
+# -------------------------
 @app.get("/", response_class=HTMLResponse)
 def home():
     d = fetch_latest_event()
@@ -173,16 +267,14 @@ def home():
         <ul>
           <li><b>Latitud_sismo:</b> {d["Latitud_sismo"]}</li>
           <li><b>Longitud_sismo:</b> {d["Longitud_sismo"]}</li>
-          <li><b>Profundidad (km):</b> {d["Profundidad_km"]}</li>
-          <li><b>Magnitud:</b> {d["Magnitud"]}</li>
+          <li><b>Profundidad (km):</b> {d["Profundidad"]}</li>
+          <li><b>Magnitud:</b> {d["magnitud"]}</li>
         </ul>
         <p><b>Fuente:</b> <a href="{d["Fuente_informe"]}" target="_blank">{d["Fuente_informe"]}</a></p>
-
         <hr/>
         <p>
-          Ver distancias a localidades:
-          <a href="/distancias">/distancias</a> |
-          <a href="/distancias/json">/distancias/json</a>
+          <a href="/intensidades">Ver intensidades por localidad</a> |
+          <a href="/intensidades/json">Ver JSON</a>
         </p>
       </body>
     </html>
@@ -195,41 +287,35 @@ def latest_json():
     return JSONResponse(fetch_latest_event())
 
 
-@app.get("/distancias", response_class=HTMLResponse)
-def distancias_html(n: int = Query(50, ge=1, le=5000)):
-    """
-    Muestra una tabla con las N localidades más cercanas (ordenadas por distancia).
-    Puedes cambiar N con ?n=200, etc.
-    """
+@app.get("/intensidades", response_class=HTMLResponse)
+def intensidades_html(n: int = Query(200, ge=1, le=20000)):
     evento = fetch_latest_event()
-    dist = compute_distancias(evento)
+    preds, order = predict_intensidades(evento)
 
-    dist_show = dist[:n]
-
+    show = preds[:n]
     rows = "\n".join(
-        f"<tr><td>{i+1}</td><td>{x['localidad']}</td><td>{x['distancia_km']}</td><td>{x['latitud']}</td><td>{x['longitud']}</td></tr>"
-        for i, x in enumerate(dist_show)
+        f"<tr><td>{i+1}</td><td>{x['localidad']}</td><td>{x['distancia_epicentro_km']}</td>"
+        f"<td>{x['intensidad_predicha']}</td><td>{x['Latitud_localidad']}</td><td>{x['Longitud_localidad']}</td></tr>"
+        for i, x in enumerate(show)
     )
 
     html = f"""
     <html>
-      <head>
-        <meta charset="utf-8">
-        <title>Distancias a localidades</title>
-      </head>
+      <head><meta charset="utf-8"><title>Intensidades por localidad</title></head>
       <body style="font-family: Arial, sans-serif; padding: 24px;">
-        <h2>Distancias desde el último sismo a localidades</h2>
-
+        <h2>Intensidad estimada por localidad (modelo RF)</h2>
         <p>
           <b>Sismo:</b> lat {evento["Latitud_sismo"]}, lon {evento["Longitud_sismo"]},
-          prof {evento["Profundidad_km"]} km, M {evento["Magnitud"]}
+          prof {evento["Profundidad"]} km, M {evento["magnitud"]}
           (<a href="{evento["Fuente_informe"]}" target="_blank">fuente</a>)
         </p>
-
         <p>
-          Mostrando <b>{len(dist_show)}</b> de <b>{len(dist)}</b> localidades.
-          (Puedes cambiar con <code>?n=200</code>)
+          CSV: <code>{CSV_PATH}</code><br/>
+          Modelo local: <code>{MODEL_PATH}</code><br/>
+          Modelo URL: <code>{MODEL_URL}</code><br/>
+          Features usadas (orden): <code>{", ".join(order)}</code>
         </p>
+        <p>Mostrando <b>{len(show)}</b> filas. (cambia con <code>?n=500</code>)</p>
 
         <table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse;">
           <thead>
@@ -237,18 +323,17 @@ def distancias_html(n: int = Query(50, ge=1, le=5000)):
               <th>#</th>
               <th>Localidad</th>
               <th>Distancia (km)</th>
-              <th>Latitud</th>
-              <th>Longitud</th>
+              <th>Intensidad (pred)</th>
+              <th>Lat</th>
+              <th>Lon</th>
             </tr>
           </thead>
-          <tbody>
-            {rows}
-          </tbody>
+          <tbody>{rows}</tbody>
         </table>
 
         <p style="margin-top: 16px;">
           <a href="/">Volver</a> |
-          <a href="/distancias/json">Ver JSON</a>
+          <a href="/intensidades/json">Ver JSON</a>
         </p>
       </body>
     </html>
@@ -256,16 +341,19 @@ def distancias_html(n: int = Query(50, ge=1, le=5000)):
     return HTMLResponse(content=html)
 
 
-@app.get("/distancias/json")
-def distancias_json():
+@app.get("/intensidades/json")
+def intensidades_json():
     evento = fetch_latest_event()
-    dist = compute_distancias(evento)
+    preds, order = predict_intensidades(evento)
     return JSONResponse(
         {
             "evento": evento,
             "csv": CSV_PATH,
-            "cantidad_localidades": len(dist),
-            "distancias": dist,
+            "modelo_local": MODEL_PATH,
+            "modelo_url": MODEL_URL,
+            "features_orden": order,
+            "cantidad_localidades": len(preds),
+            "resultados": preds,
         }
     )
 
