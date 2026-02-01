@@ -273,13 +273,14 @@ def build_feature_matrix(evento: dict, locs: list[dict]):
         }
         rows.append(feats)
         meta.append(
-            {
-                "localidad": loc["localidad"],
-                "comuna": loc.get("comuna", ""),
-                "region": loc.get("region", ""),
-                "distancia_epicentro_km": round(dist, 2),
-            }
-        )
+    {
+        "localidad": loc["localidad"],
+        "comuna": loc.get("comuna", ""),
+        "region": loc.get("region", ""),
+        "distancia_epicentro_km": int(round(dist)),
+    }
+)
+
 
     model = load_model()
     order = list(model.feature_names_in_) if hasattr(model, "feature_names_in_") else FEATURES
