@@ -16,20 +16,20 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; RailwayBot/1.0; +https://rail
 
 CSV_PATH = os.getenv("LOCALIDADES_CSV", "Localidades_Enero_2026_con_coords.csv")
 
-# Ruta local dentro del contenedor (NO subas el PKL al repo)
+# Ruta local dentro del contenedor (el PKL se descargará aquí)
 MODEL_PATH = os.getenv("MODEL_PATH", "Sismos_RF_joblib_Ene_2026.pkl")
 
-# Link directo a Drive (tu link)
+# URL directa del asset en GitHub Releases (tag v1.0)
 MODEL_URL = os.getenv(
     "MODEL_URL",
-    "https://drive.google.com/uc?export=download&id=198obnKfjpyomMDD4DivcooQUulv5eZGX"
+    "https://github.com/juansotodaniels/sismos-railway/releases/download/v1.0/Sismos_RF_joblib_Ene_2026.pkl"
 )
 
 app = FastAPI(title="Último sismo + distancias + intensidades (RF)")
 
 
 # -------------------------
-# Utilidades numéricas / geográficas
+# Utilidades
 # -------------------------
 def _to_float(s: str) -> float:
     s = str(s).strip().replace(",", ".")
@@ -37,9 +37,7 @@ def _to_float(s: str) -> float:
 
 
 def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """
-    Distancia Haversine (Tierra como esfera). Retorna km.
-    """
+    """Distancia Haversine (Tierra como esfera), km."""
     R = 6371.0
     phi1 = math.radians(lat1)
     phi2 = math.radians(lat2)
@@ -57,16 +55,6 @@ def detect_delimiter(sample_text: str) -> str:
         return dialect.delimiter
     except Exception:
         return ";"
-
-
-def _looks_like_html_bytes(b: bytes) -> bool:
-    head = b[:800].lower()
-    return (
-        head.startswith(b"<!doctype html")
-        or head.startswith(b"<html")
-        or b"<html" in head
-        or b"google drive" in head
-    )
 
 
 # -------------------------
@@ -137,9 +125,7 @@ def read_localidades(csv_path: str) -> list[dict]:
         name_col = find_col(["localidad", "nombre", "name", "ciudad", "comuna", "poblado", "locality"]) or fields[0]
 
         if not lat_col or not lon_col:
-            raise RuntimeError(
-                f"No pude identificar columnas de lat/lon en el CSV. Headers detectados: {fields}"
-            )
+            raise RuntimeError(f"No pude identificar columnas de lat/lon en el CSV. Headers: {fields}")
 
         locs = []
         for row in reader:
@@ -158,59 +144,19 @@ def read_localidades(csv_path: str) -> list[dict]:
 
 
 # -------------------------
-# Descarga Google Drive robusta (cookie download_warning)
+# Descarga + carga del modelo (cache)
 # -------------------------
 MODEL = None
 
 
 def ensure_model():
-    """
-    Descarga el modelo desde Google Drive si no existe localmente.
-    Maneja el 'virus scan warning' usando cookie download_warning.
-    """
+    # si ya está y pesa razonablemente, no lo bajes de nuevo
     if os.path.exists(MODEL_PATH) and os.path.getsize(MODEL_PATH) > 1024 * 1024:
         return
 
-    session = requests.Session()
-    session.headers.update(HEADERS)
-
-    def get_response(url: str, params: dict | None = None):
-        resp = session.get(url, params=params, stream=True, timeout=180, allow_redirects=True)
-        resp.raise_for_status()
-        return resp
-
     print(f"[MODEL] Descargando modelo desde: {MODEL_URL}")
-
-    # 1) primer request (puede setear cookie download_warning)
-    resp = get_response(MODEL_URL)
-
-    # 2) busca cookie download_warning*
-    confirm_token = None
-    for k, v in session.cookies.items():
-        if k.startswith("download_warning"):
-            confirm_token = v
-            break
-
-    # 3) si hay token, reintenta con confirm
-    if confirm_token:
-        print("[MODEL] Cookie download_warning detectada. Reintentando con confirm token...")
-        resp = get_response(MODEL_URL, params={"confirm": confirm_token})
-
-    # 4) mirar los primeros bytes para ver si es HTML
-    head = resp.raw.read(800)
-
-    if _looks_like_html_bytes(head):
-        raise RuntimeError(
-            "Google Drive devolvió HTML (pantalla de confirmación) en vez del .pkl. "
-            "En algunos archivos Drive bloquea descargas automáticas. "
-            "Solución recomendada: GitHub Releases (web) o storage con descarga binaria directa."
-        )
-
-    # 5) Descargar completo (rehacer request para no pelear con el stream ya consumido)
-    if confirm_token:
-        resp = get_response(MODEL_URL, params={"confirm": confirm_token})
-    else:
-        resp = get_response(MODEL_URL)
+    resp = requests.get(MODEL_URL, headers=HEADERS, stream=True, timeout=300)
+    resp.raise_for_status()
 
     with open(MODEL_PATH, "wb") as f:
         for chunk in resp.iter_content(chunk_size=1024 * 1024):
@@ -218,7 +164,7 @@ def ensure_model():
                 f.write(chunk)
 
     size_mb = os.path.getsize(MODEL_PATH) / (1024 * 1024)
-    print(f"[MODEL] Modelo guardado en {MODEL_PATH} ({size_mb:.2f} MB).")
+    print(f"[MODEL] Modelo descargado correctamente ({size_mb:.2f} MB).")
 
 
 def load_model():
@@ -435,3 +381,4 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8000"))
     uvicorn.run("app:app", host="0.0.0.0", port=port)
+
