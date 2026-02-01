@@ -59,6 +59,16 @@ def detect_delimiter(sample_text: str) -> str:
         return ";"
 
 
+def _looks_like_html_bytes(b: bytes) -> bool:
+    head = b[:800].lower()
+    return (
+        head.startswith(b"<!doctype html")
+        or head.startswith(b"<html")
+        or b"<html" in head
+        or b"google drive" in head
+    )
+
+
 # -------------------------
 # Scraping: último sismo
 # -------------------------
@@ -148,68 +158,64 @@ def read_localidades(csv_path: str) -> list[dict]:
 
 
 # -------------------------
-# Descarga Google Drive robusta (virus scan)
+# Descarga Google Drive robusta (cookie download_warning)
 # -------------------------
 MODEL = None
-
-
-def _looks_like_html(b: bytes) -> bool:
-    head = b[:400].lower()
-    return head.startswith(b"<!doctype html") or head.startswith(b"<html") or b"<html" in head
 
 
 def ensure_model():
     """
     Descarga el modelo desde Google Drive si no existe localmente.
-    Maneja el 'virus scan warning' (Drive devuelve HTML + token confirm).
+    Maneja el 'virus scan warning' usando cookie download_warning.
     """
     if os.path.exists(MODEL_PATH) and os.path.getsize(MODEL_PATH) > 1024 * 1024:
-        return  # ya está y pesa razonablemente
+        return
 
     session = requests.Session()
     session.headers.update(HEADERS)
 
-    def get_bytes(url: str) -> bytes:
-        resp = session.get(url, timeout=90, allow_redirects=True)
+    def get_response(url: str, params: dict | None = None):
+        resp = session.get(url, params=params, stream=True, timeout=180, allow_redirects=True)
         resp.raise_for_status()
-        return resp.content
+        return resp
 
     print(f"[MODEL] Descargando modelo desde: {MODEL_URL}")
-    content = get_bytes(MODEL_URL)
 
-    # Si Drive devolvió HTML (warning), extrae confirm token y reintenta
-    if _looks_like_html(content):
-        html = content.decode("utf-8", errors="ignore")
+    # 1) primer request (puede setear cookie download_warning)
+    resp = get_response(MODEL_URL)
 
-        # En el HTML suele aparecer confirm=XXXX
-        m = re.search(r"confirm=([0-9A-Za-z_]+)", html)
-        if not m:
-            # fallback: algunas variantes
-            m = re.search(r"confirm=([0-9A-Za-z]+)", html)
+    # 2) busca cookie download_warning*
+    confirm_token = None
+    for k, v in session.cookies.items():
+        if k.startswith("download_warning"):
+            confirm_token = v
+            break
 
-        if not m:
-            raise RuntimeError(
-                "Google Drive devolvió una página HTML (probable verificación de virus) y "
-                "no pude extraer el token 'confirm'. "
-                "Recomendación: usar GitHub Releases o un storage con descarga directa."
-            )
+    # 3) si hay token, reintenta con confirm
+    if confirm_token:
+        print("[MODEL] Cookie download_warning detectada. Reintentando con confirm token...")
+        resp = get_response(MODEL_URL, params={"confirm": confirm_token})
 
-        token = m.group(1)
-        sep = "&" if "?" in MODEL_URL else "?"
-        url2 = f"{MODEL_URL}{sep}confirm={token}"
-        print("[MODEL] Virus-scan warning detectado. Reintentando con confirm token...")
-        content = get_bytes(url2)
+    # 4) mirar los primeros bytes para ver si es HTML
+    head = resp.raw.read(800)
 
-        if _looks_like_html(content):
-            raise RuntimeError(
-                "Sigo recibiendo HTML desde Google Drive en vez del archivo binario .pkl. "
-                "Drive podría estar bloqueando la descarga automática. "
-                "Solución: GitHub Releases (recomendado) o un link directo distinto."
-            )
+    if _looks_like_html_bytes(head):
+        raise RuntimeError(
+            "Google Drive devolvió HTML (pantalla de confirmación) en vez del .pkl. "
+            "En algunos archivos Drive bloquea descargas automáticas. "
+            "Solución recomendada: GitHub Releases (web) o storage con descarga binaria directa."
+        )
 
-    # Guardar modelo
+    # 5) Descargar completo (rehacer request para no pelear con el stream ya consumido)
+    if confirm_token:
+        resp = get_response(MODEL_URL, params={"confirm": confirm_token})
+    else:
+        resp = get_response(MODEL_URL)
+
     with open(MODEL_PATH, "wb") as f:
-        f.write(content)
+        for chunk in resp.iter_content(chunk_size=1024 * 1024):
+            if chunk:
+                f.write(chunk)
 
     size_mb = os.path.getsize(MODEL_PATH) / (1024 * 1024)
     print(f"[MODEL] Modelo guardado en {MODEL_PATH} ({size_mb:.2f} MB).")
@@ -405,12 +411,6 @@ def intensidades_json():
 
 @app.get("/health")
 def health():
-    """
-    Endpoint simple para diagnosticar:
-    - existencia del CSV
-    - existencia/tamaño del PKL
-    - posibilidad de cargar modelo
-    """
     status = {
         "csv_exists": os.path.exists(CSV_PATH),
         "csv_path": CSV_PATH,
@@ -421,7 +421,6 @@ def health():
     if status["model_exists"]:
         status["model_size_mb"] = round(os.path.getsize(MODEL_PATH) / (1024 * 1024), 2)
 
-    # intenta cargar el modelo (sin predecir)
     try:
         _ = load_model()
         status["model_load_ok"] = True
@@ -436,4 +435,3 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8000"))
     uvicorn.run("app:app", host="0.0.0.0", port=port)
-
