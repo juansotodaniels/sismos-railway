@@ -2,6 +2,7 @@ import os
 import re
 import csv
 import math
+import threading
 
 import requests
 import numpy as np
@@ -14,9 +15,16 @@ from fastapi.responses import HTMLResponse, JSONResponse
 # ============================================================
 # CONFIGURACIÓN (MODIFICABLE)
 # ============================================================
-MIN_EVENT_MAGNITUDE = 0         # <-- SOLO toma sismos con magnitud >= esto
-MIN_INTENSITY_TO_SHOW = 2       # <-- SOLO muestra localidades con intensidad >= esto
-MAX_EVENTS_TO_SCAN = 25         # <-- cuántos informes recientes revisar para encontrar uno que cumpla
+MIN_EVENT_MAGNITUDE = float(os.getenv("MIN_EVENT_MAGNITUDE", "0.0"))
+MIN_INTENSITY_TO_SHOW = int(os.getenv("MIN_INTENSITY_TO_SHOW", "2"))
+MAX_EVENTS_TO_SCAN = int(os.getenv("MAX_EVENTS_TO_SCAN", "25"))
+
+# Pre-cargar el modelo al iniciar el contenedor (evita 500 en /intensidades)
+PRELOAD_MODEL_ON_STARTUP = os.getenv("PRELOAD_MODEL_ON_STARTUP", "1") == "1"
+
+# Timeout de descargas
+HTTP_TIMEOUT = int(os.getenv("HTTP_TIMEOUT", "25"))
+MODEL_DOWNLOAD_TIMEOUT = int(os.getenv("MODEL_DOWNLOAD_TIMEOUT", "600"))
 # ============================================================
 
 BASE_URL = "https://www.sismologia.cl/"
@@ -25,7 +33,6 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; RailwayBot/1.0; +https://rail
 CSV_PATH = os.getenv("LOCALIDADES_CSV", "Localidades_Enero_2026_con_coords_region_comuna.csv")
 
 MODEL_PATH = os.getenv("MODEL_PATH", "Sismos_RF_joblib_Ene_2026.pkl")
-
 MODEL_URL = os.getenv(
     "MODEL_URL",
     "https://github.com/juansotodaniels/sismos-railway/releases/download/v1.0/Sismos_RF_joblib_Ene_2026.pkl"
@@ -40,9 +47,7 @@ def _to_float(s: str) -> float:
     s = str(s).strip().replace(",", ".")
     return float(s)
 
-
 def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Distancia Haversine (Tierra como esfera), km."""
     R = 6371.0
     phi1 = math.radians(lat1)
     phi2 = math.radians(lat2)
@@ -53,7 +58,6 @@ def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
     return R * c
 
-
 def detect_delimiter(sample_text: str) -> str:
     try:
         dialect = csv.Sniffer().sniff(sample_text, delimiters=";,\t|")
@@ -61,9 +65,7 @@ def detect_delimiter(sample_text: str) -> str:
     except Exception:
         return ";"
 
-
 def round_intensity(x) -> int:
-    """Salida del modelo a int redondeando al entero más cercano. NaN/error => 0."""
     try:
         v = float(x)
         if np.isnan(v):
@@ -72,15 +74,13 @@ def round_intensity(x) -> int:
     except Exception:
         return 0
 
-
 def _clean_txt(x) -> str:
     if x is None:
         return ""
     return str(x).strip()
 
-
 # -------------------------
-# Lectura CSV: localidades (incluye comuna/region si existen)
+# CSV: localidades
 # -------------------------
 def read_localidades(csv_path: str) -> list[dict]:
     if not os.path.exists(csv_path):
@@ -108,9 +108,8 @@ def read_localidades(csv_path: str) -> list[dict]:
         lat_col = find_col_contains(["lat", "latitude", "latitud"])
         lon_col = find_col_contains(["lon", "long", "longitude", "longitud"])
         name_col = find_col_contains(["localidad", "nombre", "name", "ciudad", "poblado", "locality"]) or fields[0]
-
-        comuna_col = find_col_contains(["comuna", "municip"])
-        region_col = find_col_contains(["región", "region", "region_nombre", "regionname"])
+        comuna_col = find_col_contains(["comuna"])
+        region_col = find_col_contains(["región", "region"])
 
         if not lat_col or not lon_col:
             raise RuntimeError(f"No pude identificar columnas de lat/lon en el CSV. Headers: {fields}")
@@ -141,15 +140,12 @@ def read_localidades(csv_path: str) -> list[dict]:
         raise RuntimeError("No se pudieron leer localidades válidas desde el CSV.")
     return locs
 
-
 def referencia_por_localidad_mas_cercana(evento: dict, locs: list[dict]) -> str | None:
-    """Referencia robusta: distancia + localidad más cercana + comuna + región."""
     lat_s = evento["Latitud_sismo"]
     lon_s = evento["Longitud_sismo"]
 
     best = None
     best_d = float("inf")
-
     for loc in locs:
         d = haversine_km(lat_s, lon_s, loc["Latitud_localidad"], loc["Longitud_localidad"])
         if d < best_d:
@@ -163,12 +159,11 @@ def referencia_por_localidad_mas_cercana(evento: dict, locs: list[dict]) -> str 
     region = best.get("region") or "No disponible"
     return f"{round(best_d, 1)} km de {best['localidad']} (Comuna: {comuna}, Región: {region})"
 
-
 # -------------------------
-# Scraping: encontrar el último sismo que cumpla magnitud mínima
+# Scraping: último sismo que cumpla magnitud mínima
 # -------------------------
 def parse_event_from_informe(informe_url: str) -> dict:
-    r2 = requests.get(informe_url, headers=HEADERS, timeout=20)
+    r2 = requests.get(informe_url, headers=HEADERS, timeout=HTTP_TIMEOUT)
     r2.raise_for_status()
     text = BeautifulSoup(r2.text, "html.parser").get_text("\n", strip=True)
 
@@ -188,33 +183,25 @@ def parse_event_from_informe(informe_url: str) -> dict:
         "Fuente_informe": informe_url,
     }
 
-
 def fetch_latest_event(min_mag: float = MIN_EVENT_MAGNITUDE) -> dict:
-    """
-    Busca en los informes más recientes el primer evento con magnitud >= min_mag.
-    """
-    r = requests.get(BASE_URL, headers=HEADERS, timeout=20)
+    r = requests.get(BASE_URL, headers=HEADERS, timeout=HTTP_TIMEOUT)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
 
     links = soup.select('a[href^="sismicidad/informes/"]')
     if not links:
-        # fallback por regex
         links = soup.find_all("a", href=re.compile(r"sismicidad/informes/"))
 
     if not links:
         raise RuntimeError("No se encontraron links a informes de sismos en la portada.")
 
-    # Recorremos varios informes recientes
     scanned = 0
-    last_errors = []
     for a in links[:MAX_EVENTS_TO_SCAN]:
         scanned += 1
         informe_url = BASE_URL.rstrip("/") + "/" + a["href"].lstrip("/")
         try:
             evento = parse_event_from_informe(informe_url)
             if evento["magnitud"] >= float(min_mag):
-                # referencia calculada (localidad más cercana)
                 try:
                     locs = read_localidades(CSV_PATH)
                     evento["Referencia"] = referencia_por_localidad_mas_cercana(evento, locs)
@@ -223,27 +210,25 @@ def fetch_latest_event(min_mag: float = MIN_EVENT_MAGNITUDE) -> dict:
                 evento["min_magnitud_usada"] = float(min_mag)
                 evento["informes_revisados"] = scanned
                 return evento
-        except Exception as e:
-            last_errors.append(f"{informe_url}: {e}")
+        except Exception:
+            continue
 
     raise RuntimeError(
-        f"No se encontró un sismo con magnitud >= {min_mag} revisando {scanned} informes. "
-        f"Últimos errores: {last_errors[-3:]}"
+        f"No se encontró un sismo con magnitud >= {min_mag} revisando {scanned} informes."
     )
 
-
 # -------------------------
-# Descarga + carga del modelo (cache)
+# Modelo: descarga + carga (con lock)
 # -------------------------
 MODEL = None
-
+MODEL_LOCK = threading.Lock()
 
 def ensure_model():
     if os.path.exists(MODEL_PATH) and os.path.getsize(MODEL_PATH) > 1024 * 1024:
         return
 
     print(f"[MODEL] Descargando modelo desde: {MODEL_URL}")
-    resp = requests.get(MODEL_URL, headers=HEADERS, stream=True, timeout=300)
+    resp = requests.get(MODEL_URL, headers=HEADERS, stream=True, timeout=MODEL_DOWNLOAD_TIMEOUT)
     resp.raise_for_status()
 
     with open(MODEL_PATH, "wb") as f:
@@ -254,15 +239,14 @@ def ensure_model():
     size_mb = os.path.getsize(MODEL_PATH) / (1024 * 1024)
     print(f"[MODEL] Modelo descargado correctamente ({size_mb:.2f} MB).")
 
-
 def load_model():
     global MODEL
-    if MODEL is None:
-        ensure_model()
-        MODEL = joblib.load(MODEL_PATH)
-        print("[MODEL] Modelo cargado en memoria.")
+    with MODEL_LOCK:
+        if MODEL is None:
+            ensure_model()
+            MODEL = joblib.load(MODEL_PATH)
+            print("[MODEL] Modelo cargado en memoria.")
     return MODEL
-
 
 FEATURES = [
     "Latitud_sismo",
@@ -274,7 +258,6 @@ FEATURES = [
     "distancia_epicentro",
 ]
 
-
 def build_feature_matrix(evento: dict, locs: list[dict]):
     lat_s = evento["Latitud_sismo"]
     lon_s = evento["Longitud_sismo"]
@@ -283,7 +266,6 @@ def build_feature_matrix(evento: dict, locs: list[dict]):
     meta = []
     for loc in locs:
         dist = haversine_km(lat_s, lon_s, loc["Latitud_localidad"], loc["Longitud_localidad"])
-
         feats = {
             "Latitud_sismo": lat_s,
             "Longitud_sismo": lon_s,
@@ -293,15 +275,12 @@ def build_feature_matrix(evento: dict, locs: list[dict]):
             "Longitud_localidad": loc["Longitud_localidad"],
             "distancia_epicentro": dist,
         }
-
         rows.append(feats)
         meta.append(
             {
                 "localidad": loc["localidad"],
                 "comuna": loc.get("comuna", ""),
                 "region": loc.get("region", ""),
-                "Latitud_localidad": loc["Latitud_localidad"],
-                "Longitud_localidad": loc["Longitud_localidad"],
                 "distancia_epicentro_km": round(dist, 2),
             }
         )
@@ -310,7 +289,6 @@ def build_feature_matrix(evento: dict, locs: list[dict]):
     order = list(model.feature_names_in_) if hasattr(model, "feature_names_in_") else FEATURES
     X = np.array([[float(r.get(c, np.nan)) for c in order] for r in rows], dtype=float)
     return X, meta, order
-
 
 def predict_intensidades(evento: dict, min_intensity: int = MIN_INTENSITY_TO_SHOW):
     locs = read_localidades(CSV_PATH)
@@ -322,16 +300,25 @@ def predict_intensidades(evento: dict, min_intensity: int = MIN_INTENSITY_TO_SHO
     out = []
     for i, m in enumerate(meta):
         intensidad = round_intensity(y_pred[i])
-
-        # ✅ filtrar por intensidad mínima configurable
         if intensidad < int(min_intensity):
             continue
-
         out.append({**m, "intensidad_predicha": intensidad})
 
     out.sort(key=lambda x: (-x["intensidad_predicha"], x["distancia_epicentro_km"]))
     return out, order
 
+# -------------------------
+# Startup: precarga del modelo (evita 500 en /intensidades)
+# -------------------------
+@app.on_event("startup")
+def startup():
+    if PRELOAD_MODEL_ON_STARTUP:
+        try:
+            print("[STARTUP] Precargando modelo...")
+            load_model()
+            print("[STARTUP] OK: modelo listo.")
+        except Exception as e:
+            print(f"[STARTUP] WARNING: no pude precargar modelo: {e}")
 
 # -------------------------
 # Endpoints
@@ -360,6 +347,7 @@ def home():
         <p>
           <a href="/intensidades">Ver localidades con intensidad ≥ {MIN_INTENSITY_TO_SHOW}</a> |
           <a href="/intensidades/json">Ver JSON</a> |
+          <a href="/warmup">Warmup</a> |
           <a href="/health">Health</a>
         </p>
       </body>
@@ -367,70 +355,91 @@ def home():
     """
     return HTMLResponse(content=html)
 
-
-@app.get("/json")
-def latest_json():
-    return JSONResponse(fetch_latest_event())
-
+@app.get("/warmup")
+def warmup():
+    # fuerza descarga/carga (útil si desactivaste preload)
+    load_model()
+    return {"ok": True, "model_loaded": True}
 
 @app.get("/intensidades", response_class=HTMLResponse)
 def intensidades_html(n: int = Query(200, ge=1, le=20000)):
-    evento = fetch_latest_event()
-    preds, order = predict_intensidades(evento)
+    try:
+        evento = fetch_latest_event()
+        preds, order = predict_intensidades(evento)
 
-    show = preds[:n]
-    rows = "\n".join(
-        f"<tr><td>{i+1}</td><td>{x['localidad']}</td><td>{x.get('comuna','')}</td><td>{x.get('region','')}</td>"
-        f"<td>{x['distancia_epicentro_km']}</td><td><b>{x['intensidad_predicha']}</b></td></tr>"
-        for i, x in enumerate(show)
-    )
+        show = preds[:n]
+        rows = "\n".join(
+            f"<tr><td>{i+1}</td>"
+            f"<td>{x['localidad']}</td>"
+            f"<td>{x.get('comuna','')}</td>"
+            f"<td>{x.get('region','')}</td>"
+            f"<td>{x['distancia_epicentro_km']}</td>"
+            f"<td><b>{x['intensidad_predicha']}</b></td></tr>"
+            for i, x in enumerate(show)
+        )
 
-    ref = evento.get("Referencia") or "No disponible"
+        ref = evento.get("Referencia") or "No disponible"
 
-    html = f"""
-    <html>
-      <head><meta charset="utf-8"><title>Intensidades por localidad</title></head>
-      <body style="font-family: Arial, sans-serif; padding: 24px;">
-        <h2>Intensidades (solo ≥ {MIN_INTENSITY_TO_SHOW})</h2>
-        <p>
-          <b>Sismo:</b> lat {evento["Latitud_sismo"]}, lon {evento["Longitud_sismo"]},
-          prof {evento["Profundidad"]} km, M {evento["magnitud"]}<br/>
-          <b>Referencia:</b> {ref}
-          (<a href="{evento["Fuente_informe"]}" target="_blank">fuente</a>)
-        </p>
+        html = f"""
+        <html>
+          <head><meta charset="utf-8"><title>Intensidades</title></head>
+          <body style="font-family: Arial, sans-serif; padding: 24px;">
+            <h2>Intensidades (solo ≥ {MIN_INTENSITY_TO_SHOW})</h2>
+            <p>
+              <b>Sismo:</b> lat {evento["Latitud_sismo"]}, lon {evento["Longitud_sismo"]},
+              prof {evento["Profundidad"]} km, M {evento["magnitud"]}<br/>
+              <b>Referencia:</b> {ref}
+              (<a href="{evento["Fuente_informe"]}" target="_blank">fuente</a>)
+            </p>
 
-        <p>
-          ✅ Intensidades redondeadas al entero más cercano<br/>
-          ✅ Filtro: intensidad ≥ <b>{MIN_INTENSITY_TO_SHOW}</b><br/>
-          ✅ Evento: magnitud ≥ <b>{MIN_EVENT_MAGNITUDE}</b><br/>
-          Features usadas (orden): <code>{", ".join(order)}</code>
-        </p>
+            <p>
+              ✅ Intensidades redondeadas al entero más cercano<br/>
+              ✅ Filtro: intensidad ≥ <b>{MIN_INTENSITY_TO_SHOW}</b><br/>
+              ✅ Evento: magnitud ≥ <b>{MIN_EVENT_MAGNITUDE}</b><br/>
+              Features usadas (orden): <code>{", ".join(order)}</code>
+            </p>
 
-        <p>Mostrando <b>{len(show)}</b> filas. (cambia con <code>?n=500</code>)</p>
+            <p>Mostrando <b>{len(show)}</b> filas. (cambia con <code>?n=500</code>)</p>
 
-        <table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse;">
-          <thead>
-            <tr>
-              <th>#</th>
-              <th>Localidad</th>
-              <th>Comuna</th>
-              <th>Región</th>
-              <th>Distancia (km)</th>
-              <th>Intensidad</th>
-            </tr>
-          </thead>
-          <tbody>{rows}</tbody>
-        </table>
+            <table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse;">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Localidad</th>
+                  <th>Comuna</th>
+                  <th>Región</th>
+                  <th>Distancia (km)</th>
+                  <th>Intensidad</th>
+                </tr>
+              </thead>
+              <tbody>{rows}</tbody>
+            </table>
 
-        <p style="margin-top: 16px;">
-          <a href="/">Volver</a> |
-          <a href="/intensidades/json">Ver JSON</a>
-        </p>
-      </body>
-    </html>
-    """
-    return HTMLResponse(content=html)
+            <p style="margin-top: 16px;">
+              <a href="/">Volver</a> |
+              <a href="/intensidades/json">Ver JSON</a> |
+              <a href="/health">Health</a>
+            </p>
+          </body>
+        </html>
+        """
+        return HTMLResponse(content=html)
 
+    except Exception as e:
+        # En vez de 500 vacío, mostramos el error
+        err = str(e)
+        html = f"""
+        <html>
+          <head><meta charset="utf-8"><title>Error</title></head>
+          <body style="font-family: Arial, sans-serif; padding: 24px;">
+            <h2>Ocurrió un error al calcular intensidades</h2>
+            <p style="color: #b00020;"><b>Error:</b> {err}</p>
+            <p>Revisa <a href="/health">/health</a> para ver si el modelo y CSV están OK.</p>
+            <p><a href="/">Volver</a></p>
+          </body>
+        </html>
+        """
+        return HTMLResponse(content=html, status_code=500)
 
 @app.get("/intensidades/json")
 def intensidades_json():
@@ -454,7 +463,6 @@ def intensidades_json():
         }
     )
 
-
 @app.get("/health")
 def health():
     status = {
@@ -466,8 +474,8 @@ def health():
         "MIN_EVENT_MAGNITUDE": MIN_EVENT_MAGNITUDE,
         "MIN_INTENSITY_TO_SHOW": MIN_INTENSITY_TO_SHOW,
         "MAX_EVENTS_TO_SCAN": MAX_EVENTS_TO_SCAN,
+        "PRELOAD_MODEL_ON_STARTUP": PRELOAD_MODEL_ON_STARTUP,
     }
-
     if status["model_exists"]:
         status["model_size_mb"] = round(os.path.getsize(MODEL_PATH) / (1024 * 1024), 2)
 
@@ -480,8 +488,8 @@ def health():
 
     return JSONResponse(status)
 
-
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8000"))
     uvicorn.run("app:app", host="0.0.0.0", port=port)
+
