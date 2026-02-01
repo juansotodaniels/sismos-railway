@@ -87,7 +87,10 @@ def fetch_latest_event() -> dict:
 
     r2 = requests.get(informe_url, headers=HEADERS, timeout=20)
     r2.raise_for_status()
-    text = BeautifulSoup(r2.text, "html.parser").get_text("\n", strip=True)
+    soup2 = BeautifulSoup(r2.text, "html.parser")
+
+    # Texto “plano” para regex numéricas
+    text = soup2.get_text("\n", strip=True)
 
     lat_m = re.search(r"Latitud\s*([-+]?\d+(?:[.,]\d+)?)", text)
     lon_m = re.search(r"Longitud\s*([-+]?\d+(?:[.,]\d+)?)", text)
@@ -97,14 +100,45 @@ def fetch_latest_event() -> dict:
     if not (lat_m and lon_m and prof_m and mag_m):
         raise RuntimeError("No se pudieron extraer todos los campos (lat/lon/prof/mag).")
 
+    # -------------------------
+    # NUEVO: Extraer "Referencia"
+    # -------------------------
+    # Intento 1: regex exacto "Referencia ..."
+    ref = None
+    ref_m = re.search(r"Referencia\s*[:\-]?\s*(.+)", text, re.IGNORECASE)
+    if ref_m:
+        ref = ref_m.group(1).strip()
+
+    # Intento 2 (fallback): a veces el sitio usa otro label
+    # (ajusta/expande si en tu informe aparece con otro nombre)
+    if not ref:
+        alt_labels = [
+            "Referencia geográfica",
+            "Referencias",
+            "Región",
+            "Lugar",
+            "Ubicación",
+            "Localidad",
+        ]
+        for lbl in alt_labels:
+            m = re.search(rf"{re.escape(lbl)}\s*[:\-]?\s*(.+)", text, re.IGNORECASE)
+            if m:
+                ref = m.group(1).strip()
+                break
+
+    # Limpieza mínima: corta si viene con saltos raros pegados
+    if ref:
+        # Si por algún motivo quedó con más de una línea pegada, toma la primera
+        ref = ref.split("\n")[0].strip()
+
     return {
         "Latitud_sismo": _to_float(lat_m.group(1)),
         "Longitud_sismo": _to_float(lon_m.group(1)),
         "Profundidad": _to_float(prof_m.group(1)),
         "magnitud": _to_float(mag_m.group(1)),
+        "Referencia": ref,  # ✅ NUEVO CAMPO
         "Fuente_informe": informe_url,
     }
-
 
 # -------------------------
 # Lectura CSV: localidades
