@@ -11,10 +11,18 @@ from bs4 import BeautifulSoup
 from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 
+# ============================================================
+# CONFIGURACIÓN (MODIFICABLE)
+# ============================================================
+MIN_EVENT_MAGNITUDE = 0.0       # <-- SOLO toma sismos con magnitud >= esto
+MIN_INTENSITY_TO_SHOW = 2       # <-- SOLO muestra localidades con intensidad >= esto
+MAX_EVENTS_TO_SCAN = 25         # <-- cuántos informes recientes revisar para encontrar uno que cumpla
+# ============================================================
+
 BASE_URL = "https://www.sismologia.cl/"
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; RailwayBot/1.0; +https://railway.app)"}
 
-CSV_PATH = os.getenv("LOCALIDADES_CSV", "Localidades_Enero_2026_con_coords.csv")
+CSV_PATH = os.getenv("LOCALIDADES_CSV", "Localidades_Enero_2026_con_coords_region_comuna.csv")
 
 MODEL_PATH = os.getenv("MODEL_PATH", "Sismos_RF_joblib_Ene_2026.pkl")
 
@@ -55,10 +63,7 @@ def detect_delimiter(sample_text: str) -> str:
 
 
 def round_intensity(x) -> int:
-    """
-    Convierte salida del modelo a int redondeando al entero más cercano.
-    Cualquier NaN/error => 0.
-    """
+    """Salida del modelo a int redondeando al entero más cercano. NaN/error => 0."""
     try:
         v = float(x)
         if np.isnan(v):
@@ -75,7 +80,7 @@ def _clean_txt(x) -> str:
 
 
 # -------------------------
-# Lectura CSV: localidades (ahora incluye comuna/región si existen)
+# Lectura CSV: localidades (incluye comuna/region si existen)
 # -------------------------
 def read_localidades(csv_path: str) -> list[dict]:
     if not os.path.exists(csv_path):
@@ -104,8 +109,7 @@ def read_localidades(csv_path: str) -> list[dict]:
         lon_col = find_col_contains(["lon", "long", "longitude", "longitud"])
         name_col = find_col_contains(["localidad", "nombre", "name", "ciudad", "poblado", "locality"]) or fields[0]
 
-        # NUEVO: detectar comuna y región (si están en el CSV)
-        comuna_col = find_col_contains(["comuna", "municip", "municipio"])
+        comuna_col = find_col_contains(["comuna", "municip"])
         region_col = find_col_contains(["región", "region", "region_nombre", "regionname"])
 
         if not lat_col or not lon_col:
@@ -139,10 +143,7 @@ def read_localidades(csv_path: str) -> list[dict]:
 
 
 def referencia_por_localidad_mas_cercana(evento: dict, locs: list[dict]) -> str | None:
-    """
-    Genera 'Referencia' robusta:
-    "{dist} km de {localidad} (Comuna: X, Región: Y)"
-    """
+    """Referencia robusta: distancia + localidad más cercana + comuna + región."""
     lat_s = evento["Latitud_sismo"]
     lon_s = evento["Longitud_sismo"]
 
@@ -160,26 +161,13 @@ def referencia_por_localidad_mas_cercana(evento: dict, locs: list[dict]) -> str 
 
     comuna = best.get("comuna") or "No disponible"
     region = best.get("region") or "No disponible"
-
     return f"{round(best_d, 1)} km de {best['localidad']} (Comuna: {comuna}, Región: {region})"
 
 
 # -------------------------
-# Scraping: último sismo
+# Scraping: encontrar el último sismo que cumpla magnitud mínima
 # -------------------------
-def fetch_latest_event() -> dict:
-    r = requests.get(BASE_URL, headers=HEADERS, timeout=20)
-    r.raise_for_status()
-    soup = BeautifulSoup(r.text, "html.parser")
-
-    first = soup.select_one('a[href^="sismicidad/informes/"]')
-    if not first:
-        first = soup.find("a", href=re.compile(r"sismicidad/informes/"))
-    if not first:
-        raise RuntimeError("No se encontró link al informe del último sismo en la portada.")
-
-    informe_url = BASE_URL.rstrip("/") + "/" + first["href"].lstrip("/")
-
+def parse_event_from_informe(informe_url: str) -> dict:
     r2 = requests.get(informe_url, headers=HEADERS, timeout=20)
     r2.raise_for_status()
     text = BeautifulSoup(r2.text, "html.parser").get_text("\n", strip=True)
@@ -192,7 +180,7 @@ def fetch_latest_event() -> dict:
     if not (lat_m and lon_m and prof_m and mag_m):
         raise RuntimeError("No se pudieron extraer todos los campos (lat/lon/prof/mag).")
 
-    evento = {
+    return {
         "Latitud_sismo": _to_float(lat_m.group(1)),
         "Longitud_sismo": _to_float(lon_m.group(1)),
         "Profundidad": _to_float(prof_m.group(1)),
@@ -200,14 +188,48 @@ def fetch_latest_event() -> dict:
         "Fuente_informe": informe_url,
     }
 
-    # ✅ Referencia calculada: localidad más cercana + comuna + región
-    try:
-        locs = read_localidades(CSV_PATH)
-        evento["Referencia"] = referencia_por_localidad_mas_cercana(evento, locs)
-    except Exception:
-        evento["Referencia"] = None
 
-    return evento
+def fetch_latest_event(min_mag: float = MIN_EVENT_MAGNITUDE) -> dict:
+    """
+    Busca en los informes más recientes el primer evento con magnitud >= min_mag.
+    """
+    r = requests.get(BASE_URL, headers=HEADERS, timeout=20)
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, "html.parser")
+
+    links = soup.select('a[href^="sismicidad/informes/"]')
+    if not links:
+        # fallback por regex
+        links = soup.find_all("a", href=re.compile(r"sismicidad/informes/"))
+
+    if not links:
+        raise RuntimeError("No se encontraron links a informes de sismos en la portada.")
+
+    # Recorremos varios informes recientes
+    scanned = 0
+    last_errors = []
+    for a in links[:MAX_EVENTS_TO_SCAN]:
+        scanned += 1
+        informe_url = BASE_URL.rstrip("/") + "/" + a["href"].lstrip("/")
+        try:
+            evento = parse_event_from_informe(informe_url)
+            if evento["magnitud"] >= float(min_mag):
+                # referencia calculada (localidad más cercana)
+                try:
+                    locs = read_localidades(CSV_PATH)
+                    evento["Referencia"] = referencia_por_localidad_mas_cercana(evento, locs)
+                except Exception:
+                    evento["Referencia"] = None
+                evento["min_magnitud_usada"] = float(min_mag)
+                evento["informes_revisados"] = scanned
+                return evento
+        except Exception as e:
+            last_errors.append(f"{informe_url}: {e}")
+
+    raise RuntimeError(
+        f"No se encontró un sismo con magnitud >= {min_mag} revisando {scanned} informes. "
+        f"Últimos errores: {last_errors[-3:]}"
+    )
 
 
 # -------------------------
@@ -290,7 +312,7 @@ def build_feature_matrix(evento: dict, locs: list[dict]):
     return X, meta, order
 
 
-def predict_intensidades(evento: dict):
+def predict_intensidades(evento: dict, min_intensity: int = MIN_INTENSITY_TO_SHOW):
     locs = read_localidades(CSV_PATH)
     X, meta, order = build_feature_matrix(evento, locs)
 
@@ -300,8 +322,11 @@ def predict_intensidades(evento: dict):
     out = []
     for i, m in enumerate(meta):
         intensidad = round_intensity(y_pred[i])
-        if intensidad <= 0:
+
+        # ✅ filtrar por intensidad mínima configurable
+        if intensidad < int(min_intensity):
             continue
+
         out.append({**m, "intensidad_predicha": intensidad})
 
     out.sort(key=lambda x: (-x["intensidad_predicha"], x["distancia_epicentro_km"]))
@@ -313,24 +338,27 @@ def predict_intensidades(evento: dict):
 # -------------------------
 @app.get("/", response_class=HTMLResponse)
 def home():
-    d = fetch_latest_event()
-    ref = d.get("Referencia") or "No disponible"
+    evento = fetch_latest_event()
+    ref = evento.get("Referencia") or "No disponible"
+
     html = f"""
     <html>
       <head><meta charset="utf-8"><title>Último sismo</title></head>
       <body style="font-family: Arial, sans-serif; padding: 24px;">
-        <h2>Último sismo registrado (sismologia.cl)</h2>
+        <h2>Último sismo (magnitud ≥ {MIN_EVENT_MAGNITUDE})</h2>
         <ul>
-          <li><b>Latitud_sismo:</b> {d["Latitud_sismo"]}</li>
-          <li><b>Longitud_sismo:</b> {d["Longitud_sismo"]}</li>
-          <li><b>Profundidad (km):</b> {d["Profundidad"]}</li>
-          <li><b>Magnitud:</b> {d["magnitud"]}</li>
+          <li><b>Latitud_sismo:</b> {evento["Latitud_sismo"]}</li>
+          <li><b>Longitud_sismo:</b> {evento["Longitud_sismo"]}</li>
+          <li><b>Profundidad (km):</b> {evento["Profundidad"]}</li>
+          <li><b>Magnitud:</b> {evento["magnitud"]}</li>
           <li><b>Referencia:</b> {ref}</li>
+          <li><b>Informes revisados:</b> {evento.get("informes_revisados", "-")}</li>
         </ul>
-        <p><b>Fuente:</b> <a href="{d["Fuente_informe"]}" target="_blank">{d["Fuente_informe"]}</a></p>
+        <p><b>Fuente:</b> <a href="{evento["Fuente_informe"]}" target="_blank">{evento["Fuente_informe"]}</a></p>
+
         <hr/>
         <p>
-          <a href="/intensidades">Ver intensidades por localidad (solo > 0)</a> |
+          <a href="/intensidades">Ver localidades con intensidad ≥ {MIN_INTENSITY_TO_SHOW}</a> |
           <a href="/intensidades/json">Ver JSON</a> |
           <a href="/health">Health</a>
         </p>
@@ -363,18 +391,21 @@ def intensidades_html(n: int = Query(200, ge=1, le=20000)):
     <html>
       <head><meta charset="utf-8"><title>Intensidades por localidad</title></head>
       <body style="font-family: Arial, sans-serif; padding: 24px;">
-        <h2>Intensidad estimada por localidad (modelo RF)</h2>
+        <h2>Intensidades (solo ≥ {MIN_INTENSITY_TO_SHOW})</h2>
         <p>
           <b>Sismo:</b> lat {evento["Latitud_sismo"]}, lon {evento["Longitud_sismo"]},
           prof {evento["Profundidad"]} km, M {evento["magnitud"]}<br/>
           <b>Referencia:</b> {ref}
           (<a href="{evento["Fuente_informe"]}" target="_blank">fuente</a>)
         </p>
+
         <p>
           ✅ Intensidades redondeadas al entero más cercano<br/>
-          ✅ Se muestran solo localidades con intensidad &gt; 0<br/>
+          ✅ Filtro: intensidad ≥ <b>{MIN_INTENSITY_TO_SHOW}</b><br/>
+          ✅ Evento: magnitud ≥ <b>{MIN_EVENT_MAGNITUDE}</b><br/>
           Features usadas (orden): <code>{", ".join(order)}</code>
         </p>
+
         <p>Mostrando <b>{len(show)}</b> filas. (cambia con <code>?n=500</code>)</p>
 
         <table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse;">
@@ -385,7 +416,7 @@ def intensidades_html(n: int = Query(200, ge=1, le=20000)):
               <th>Comuna</th>
               <th>Región</th>
               <th>Distancia (km)</th>
-              <th>Intensidad (pred)</th>
+              <th>Intensidad</th>
             </tr>
           </thead>
           <tbody>{rows}</tbody>
@@ -405,14 +436,20 @@ def intensidades_html(n: int = Query(200, ge=1, le=20000)):
 def intensidades_json():
     evento = fetch_latest_event()
     preds, order = predict_intensidades(evento)
+
     return JSONResponse(
         {
+            "config": {
+                "MIN_EVENT_MAGNITUDE": MIN_EVENT_MAGNITUDE,
+                "MIN_INTENSITY_TO_SHOW": MIN_INTENSITY_TO_SHOW,
+                "MAX_EVENTS_TO_SCAN": MAX_EVENTS_TO_SCAN,
+            },
             "evento": evento,
             "csv": CSV_PATH,
             "modelo_local": MODEL_PATH,
             "modelo_url": MODEL_URL,
             "features_orden": order,
-            "cantidad_localidades_filtradas_int_gt_0": len(preds),
+            "cantidad_localidades_int_ge_min": len(preds),
             "resultados": preds,
         }
     )
@@ -426,7 +463,11 @@ def health():
         "model_exists": os.path.exists(MODEL_PATH),
         "model_path": MODEL_PATH,
         "model_url": MODEL_URL,
+        "MIN_EVENT_MAGNITUDE": MIN_EVENT_MAGNITUDE,
+        "MIN_INTENSITY_TO_SHOW": MIN_INTENSITY_TO_SHOW,
+        "MAX_EVENTS_TO_SCAN": MAX_EVENTS_TO_SCAN,
     }
+
     if status["model_exists"]:
         status["model_size_mb"] = round(os.path.getsize(MODEL_PATH) / (1024 * 1024), 2)
 
@@ -444,3 +485,4 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8000"))
     uvicorn.run("app:app", host="0.0.0.0", port=port)
+
