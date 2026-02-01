@@ -331,7 +331,7 @@ def render_table(preds: list[dict], n: int) -> str:
         for i, x in enumerate(show)
     )
     return f"""
-      <p>Mostrando <b>{len(show)}</b> filas. (cambia con <code>?n=500</code>)</p>
+      #<p>Mostrando <b>{len(show)}</b> filas. (cambia con <code>?n=500</code>)</p>
       <table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse;">
         <thead>
           <tr>
@@ -339,7 +339,7 @@ def render_table(preds: list[dict], n: int) -> str:
             <th>Localidad</th>
             <th>Comuna</th>
             <th>Región</th>
-            <th>Distancia (km)</th>
+            <th>Distancia al epicentro(km)</th>
             <th>Intensidad</th>
           </tr>
         </thead>
@@ -382,10 +382,6 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
 
             {table_html}
 
-            <p style="margin-top: 16px;">
-              <a href="/intensidades/json">Ver JSON</a> |
-              <a href="/health">Health</a>
-            </p>
           </body>
         </html>
         """
