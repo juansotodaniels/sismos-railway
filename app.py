@@ -331,7 +331,6 @@ def render_table(preds: list[dict], n: int) -> str:
         for i, x in enumerate(show)
     )
     return f"""
-      #<p>Mostrando <b>{len(show)}</b> filas. (cambia con <code>?n=500</code>)</p>
       <table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse;">
         <thead>
           <tr>
