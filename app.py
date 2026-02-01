@@ -2,6 +2,7 @@ import os
 import csv
 import math
 import threading
+from datetime import datetime
 
 import requests
 import numpy as np
@@ -14,9 +15,9 @@ from fastapi.responses import HTMLResponse, JSONResponse
 # ============================================================
 # CONFIGURACIÓN (MODIFICABLE)
 # ============================================================
-MIN_EVENT_MAGNITUDE = float(os.getenv("MIN_EVENT_MAGNITUDE", "0"))       # evento: M >=
-MIN_INTENSITY_TO_SHOW = int(os.getenv("MIN_INTENSITY_TO_SHOW", "2"))     # mostrar: I >=
-DEFAULT_TABLE_ROWS = int(os.getenv("DEFAULT_TABLE_ROWS", "200"))         # filas mostradas en Home
+MIN_EVENT_MAGNITUDE = float(os.getenv("MIN_EVENT_MAGNITUDE", "4"))          # evento: M >=
+MIN_INTENSITY_TO_SHOW = int(os.getenv("MIN_INTENSITY_TO_SHOW", "4"))        # mostrar: I >=
+DEFAULT_TABLE_ROWS = int(os.getenv("DEFAULT_TABLE_ROWS", "200"))            # filas mostradas en Home
 
 PRELOAD_MODEL_ON_STARTUP = os.getenv("PRELOAD_MODEL_ON_STARTUP", "1") == "1"
 
@@ -24,8 +25,8 @@ HTTP_TIMEOUT = int(os.getenv("HTTP_TIMEOUT", "25"))
 MODEL_DOWNLOAD_TIMEOUT = int(os.getenv("MODEL_DOWNLOAD_TIMEOUT", "600"))
 # ============================================================
 
-# ✅ NUEVO: API de sismos recientes
-SISMOS_API_URL = os.getenv("SISMOS_API_URL", "https://api.xor.cl/sismo/recent")
+# ✅ Nueva API
+XOR_API_URL = os.getenv("XOR_API_URL", "https://api.xor.cl/sismo/recent")
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; RailwayBot/1.0; +https://railway.app)"}
 
@@ -37,14 +38,19 @@ MODEL_URL = os.getenv(
     "https://github.com/juansotodaniels/sismos-railway/releases/download/v1.0/Sismos_RF_joblib_Ene_2026.pkl"
 )
 
-app = FastAPI(title="SismoTrack — Intensidades (RF) + Mapa")
+app = FastAPI(title="SismoTrack — Último sismo + distancias + intensidades (RF)")
 
 # -------------------------
 # Utilidades
 # -------------------------
-def _to_float(s: str) -> float:
+def _to_float(s) -> float:
     s = str(s).strip().replace(",", ".")
     return float(s)
+
+def _clean_txt(x) -> str:
+    if x is None:
+        return ""
+    return str(x).strip()
 
 def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     R = 6371.0
@@ -73,10 +79,57 @@ def round_intensity(x) -> int:
     except Exception:
         return 0
 
-def _clean_txt(x) -> str:
-    if x is None:
-        return ""
-    return str(x).strip()
+def safe_get(d: dict, keys: list[str], default=None):
+    """Busca la primera clave existente (case-insensitive) en dict."""
+    if not isinstance(d, dict):
+        return default
+    lower_map = {str(k).lower(): k for k in d.keys()}
+    for k in keys:
+        kk = str(k).lower()
+        if kk in lower_map:
+            return d.get(lower_map[kk])
+    return default
+
+def parse_datetime_flexible(value):
+    """
+    Intenta parsear fecha/hora desde varios formatos comunes.
+    Devuelve string 'YYYY-MM-DD HH:MM:SS' o el original si no pudo.
+    """
+    if value is None:
+        return None
+
+    s = str(value).strip()
+
+    # si viene epoch
+    if s.isdigit() and len(s) in (10, 13):
+        try:
+            ts = int(s)
+            if len(s) == 13:
+                ts = ts / 1000
+            return datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S UTC")
+        except Exception:
+            pass
+
+    # ISO / variantes
+    candidates = [
+        "%Y-%m-%dT%H:%M:%S.%fZ",
+        "%Y-%m-%dT%H:%M:%SZ",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+        "%d-%m-%Y %H:%M:%S",
+        "%d/%m/%Y %H:%M:%S",
+        "%Y/%m/%d %H:%M:%S",
+    ]
+    for fmt in candidates:
+        try:
+            dt = datetime.strptime(s, fmt)
+            # no asumimos tz si no viene
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            continue
+
+    return s
+
 
 # -------------------------
 # CSV: localidades
@@ -99,6 +152,7 @@ def read_localidades(csv_path: str) -> list[dict]:
 
         def find_col_contains(candidates):
             for cand in candidates:
+                cand = cand.lower()
                 for i, col in enumerate(fields_lower):
                     if cand in col:
                         return fields[i]
@@ -156,54 +210,98 @@ def referencia_por_localidad_mas_cercana(evento: dict, locs: list[dict]) -> str 
 
     comuna = best.get("comuna") or "No disponible"
     region = best.get("region") or "No disponible"
-    return f"{round(best_d, 1)} km de {best['localidad']} (Comuna: {comuna}, Región: {region})"
+    return f"{int(round(best_d))} km de {best['localidad']} (Comuna: {comuna}, Región: {region})"
+
 
 # -------------------------
-# ✅ NUEVO: Obtener último sismo desde API xor.cl
+# API XOR: último sismo >= magnitud mínima
 # -------------------------
 def fetch_latest_event(min_mag: float = MIN_EVENT_MAGNITUDE) -> dict:
     """
-    Usa https://api.xor.cl/sismo/recent
-    Respuesta típica: { status_code, status_description, events:[{...}] }
-    Campos útiles: local_date, utc_date, latitude, longitude, depth, magnitude:{value, measure_unit}, url, map_url
+    Lee la lista de sismos desde https://api.xor.cl/sismo/recent
+    y retorna el más reciente que cumpla magnitud >= min_mag.
     """
-    params = {"magnitude": float(min_mag)}
-    r = requests.get(SISMOS_API_URL, params=params, headers=HEADERS, timeout=HTTP_TIMEOUT)
-    r.raise_for_status()
-    data = r.json()
+    resp = requests.get(XOR_API_URL, headers=HEADERS, timeout=HTTP_TIMEOUT)
+    resp.raise_for_status()
+    data = resp.json()
 
-    events = data.get("events") or []
-    if not events:
-        raise RuntimeError(f"La API no devolvió eventos para magnitude >= {min_mag}.")
-    ev = events[0]  # el más reciente
+    # puede venir como lista o como dict con "data"/"events"/etc.
+    events = None
+    if isinstance(data, list):
+        events = data
+    elif isinstance(data, dict):
+        events = (
+            safe_get(data, ["data"]) or
+            safe_get(data, ["events"]) or
+            safe_get(data, ["result"]) or
+            safe_get(data, ["results"])
+        )
+        if events is None and all(k in data for k in ["lat", "lon", "magnitude"]):
+            events = [data]
 
-    mag_obj = ev.get("magnitude") or {}
-    mag_val = mag_obj.get("value", None)
-    if mag_val is None:
-        # fallback por si viene plano
-        mag_val = ev.get("magnitude", None)
+    if not isinstance(events, list) or not events:
+        raise RuntimeError("La API XOR no devolvió una lista de sismos válida.")
 
-    evento = {
-        "Latitud_sismo": float(ev.get("latitude")),
-        "Longitud_sismo": float(ev.get("longitude")),
-        "Profundidad": float(ev.get("depth")),
-        "magnitud": float(mag_val),
-        "FechaLocal": ev.get("local_date") or "",
-        "FechaUTC": ev.get("utc_date") or "",
-        "Lugar": ev.get("id") or "",  # a veces el "id" es un texto tipo "XX km al ...", si no, queda vacío
-        "Fuente_informe": ev.get("url") or SISMOS_API_URL,
-        "MapURL": ev.get("map_url") or "",
-        "min_magnitud_usada": float(min_mag),
-    }
+    # recorremos en orden (asumimos recientes primero). si no, igual elegimos el primero que cumpla.
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
 
-    # Referencia (localidad más cercana con región/comuna)
-    try:
-        locs = read_localidades(CSV_PATH)
-        evento["Referencia"] = referencia_por_localidad_mas_cercana(evento, locs)
-    except Exception:
-        evento["Referencia"] = None
+        mag = safe_get(ev, ["magnitude", "magnitud", "mag", "m"])
+        lat = safe_get(ev, ["lat", "latitude", "latitud", "y"])
+        lon = safe_get(ev, ["lon", "lng", "long", "longitude", "longitud", "x"])
+        depth = safe_get(ev, ["depth", "profundidad", "depth_km"])
+        geo_ref = safe_get(ev, ["geo_reference", "georeference", "reference", "ref", "ubicacion", "location", "place"])
 
-    return evento
+        # fecha/hora: distintas claves posibles
+        dt_raw = (
+            safe_get(ev, ["date"]) or
+            safe_get(ev, ["datetime"]) or
+            safe_get(ev, ["time"]) or
+            safe_get(ev, ["timestamp"]) or
+            safe_get(ev, ["fecha"]) or
+            safe_get(ev, ["hora"]) or
+            safe_get(ev, ["created_at"])
+        )
+
+        try:
+            mag_f = _to_float(mag)
+            lat_f = _to_float(lat)
+            lon_f = _to_float(lon)
+            depth_f = _to_float(depth) if depth is not None and str(depth).strip() != "" else 0.0
+        except Exception:
+            continue
+
+        if mag_f < float(min_mag):
+            continue
+
+        evento = {
+            "Latitud_sismo": lat_f,
+            "Longitud_sismo": lon_f,
+            "Profundidad": depth_f,
+            "magnitud": mag_f,
+            "Fuente_informe": XOR_API_URL,
+            "Referencia_api": _clean_txt(geo_ref) or "No disponible",
+            "FechaHora": parse_datetime_flexible(dt_raw) or "No disponible",
+            "min_magnitud_usada": float(min_mag),
+        }
+
+        # referencia “más cercana” usando tu CSV (comuna + región)
+        try:
+            locs = read_localidades(CSV_PATH)
+            ref_local = referencia_por_localidad_mas_cercana(evento, locs)
+        except Exception:
+            ref_local = None
+
+        if ref_local:
+            evento["Referencia"] = f"{evento['Referencia_api']} | {ref_local}"
+        else:
+            evento["Referencia"] = evento["Referencia_api"]
+
+        return evento
+
+    raise RuntimeError(f"No se encontró un sismo con magnitud >= {min_mag} en la API XOR.")
+
 
 # -------------------------
 # Modelo: descarga + carga (con lock)
@@ -273,7 +371,7 @@ def build_feature_matrix(evento: dict, locs: list[dict]):
                 "region": loc.get("region", ""),
                 "Latitud_localidad": loc["Latitud_localidad"],
                 "Longitud_localidad": loc["Longitud_localidad"],
-                "distancia_epicentro_km": int(round(dist)),
+                "distancia_epicentro_km": int(round(dist)),   # ✅ distancia entera
             }
         )
 
@@ -291,13 +389,14 @@ def predict_intensidades(evento: dict, min_intensity: int = MIN_INTENSITY_TO_SHO
 
     out = []
     for i, m in enumerate(meta):
-        intensidad = round_intensity(y_pred[i])
+        intensidad = round_intensity(y_pred[i])  # ✅ redondeo entero
         if intensidad < int(min_intensity):
             continue
         out.append({**m, "intensidad_predicha": intensidad})
 
     out.sort(key=lambda x: (-x["intensidad_predicha"], x["distancia_epicentro_km"]))
     return out, order
+
 
 # -------------------------
 # Startup: precarga del modelo
@@ -312,18 +411,21 @@ def startup():
         except Exception as e:
             print(f"[STARTUP] WARNING: no pude precargar modelo: {e}")
 
+
 # -------------------------
 # Render HTML tabla (reutilizable)
 # -------------------------
 def render_table(preds: list[dict], n: int) -> str:
     show = preds[:n]
     rows = "\n".join(
-        f"<tr><td style='text-align:center;'>{i+1}</td>"
+        f"<tr>"
+        f"<td style='text-align:center;'>{i+1}</td>"
         f"<td>{x['localidad']}</td>"
         f"<td>{x.get('comuna','')}</td>"
         f"<td>{x.get('region','')}</td>"
-        f"<td style='text-align:center;'>{x['distancia_epicentro_km']}</td>"
-        f"<td style='text-align:center;'><b>{x['intensidad_predicha']}</b></td></tr>"
+        f"<td style='text-align:center;'>{x['distancia_epicentro_km']}</td>"  # ✅ centrado
+        f"<td style='text-align:center;'><b>{x['intensidad_predicha']}</b></td>"  # ✅ centrado
+        f"</tr>"
         for i, x in enumerate(show)
     )
     return f"""
@@ -341,6 +443,7 @@ def render_table(preds: list[dict], n: int) -> str:
         <tbody>{rows}</tbody>
       </table>
     """
+
 
 # -------------------------
 # Mapa Folium embebido
@@ -361,36 +464,32 @@ def build_map_html(evento: dict, preds: list[dict], n: int) -> str:
     lat_s = evento["Latitud_sismo"]
     lon_s = evento["Longitud_sismo"]
 
+    # Mapa centrado, luego fit_bounds
     m = folium.Map(location=[lat_s, lon_s], zoom_start=6, tiles="OpenStreetMap")
 
+    # Tooltip epicentro con datos
     ref = evento.get("Referencia") or "No disponible"
-    fecha_local = evento.get("FechaLocal") or "No disponible"
-    lugar = evento.get("Lugar") or ""
-
     tooltip_html = (
         f"<div style='font-size:13px;'>"
         f"<b>Sismo</b><br>"
-        f"<b>Fecha (local):</b> {fecha_local}<br>"
+        f"<b>Fecha/Hora:</b> {evento.get('FechaHora','No disponible')}<br>"
         f"<b>Magnitud:</b> {evento['magnitud']}<br>"
         f"<b>Epicentro:</b> ({lat_s}, {lon_s})<br>"
         f"<b>Referencia:</b> {ref}"
         f"</div>"
     )
 
-    popup_txt = (
-        f"<b>Epicentro</b><br>"
-        f"Fecha local: {fecha_local}<br>"
-        f"Lat: {lat_s}<br>Lon: {lon_s}<br>"
-        f"Prof: {evento['Profundidad']} km<br>"
-        f"M: {evento['magnitud']}<br>"
-        f"{('Lugar: ' + lugar + '<br>') if lugar else ''}"
-        f"{('<a href=' + '\"' + evento['Fuente_informe'] + '\"' + ' target=\"_blank\">Fuente</a>') if evento.get('Fuente_informe') else ''}"
-    )
-
     folium.Marker(
         location=[lat_s, lon_s],
         tooltip=folium.Tooltip(tooltip_html, sticky=True),
-        popup=folium.Popup(popup_txt, max_width=320),
+        popup=folium.Popup(
+            f"<b>Epicentro</b><br>"
+            f"Fecha/Hora: {evento.get('FechaHora','No disponible')}<br>"
+            f"Lat: {lat_s}<br>Lon: {lon_s}<br>"
+            f"Prof: {evento['Profundidad']} km<br>M: {evento['magnitud']}<br>"
+            f"Ref: {ref}",
+            max_width=320
+        ),
         icon=folium.Icon(color="red", icon="info-sign"),
     ).add_to(m)
 
@@ -414,7 +513,6 @@ def build_map_html(evento: dict, preds: list[dict], n: int) -> str:
         )
 
         col = intensity_color(i)
-
         folium.CircleMarker(
             location=[lat, lon],
             radius=intensity_radius(i),
@@ -429,24 +527,29 @@ def build_map_html(evento: dict, preds: list[dict], n: int) -> str:
 
         bounds.append([lat, lon])
 
+    # zoom automático para que se vean todos
     if len(bounds) >= 2:
         m.fit_bounds(bounds, padding=(20, 20))
 
     return m.get_root().render()
+
 
 # -------------------------
 # Endpoints
 # -------------------------
 @app.get("/", response_class=HTMLResponse)
 def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
+    """
+    HOME = resumen del sismo + tabla + mapa en la MISMA página
+    """
     try:
-        evento = fetch_latest_event()
-        ref = evento.get("Referencia") or "No disponible"
-
+        evento = fetch_latest_event(MIN_EVENT_MAGNITUDE)
         preds, order = predict_intensidades(evento, MIN_INTENSITY_TO_SHOW)
+
         table_html = render_table(preds, n)
 
         map_html = build_map_html(evento, preds, n)
+        # escapar para srcdoc
         srcdoc = (
             map_html.replace("&", "&amp;")
                     .replace('"', "&quot;")
@@ -454,39 +557,51 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
                     .replace(">", "&gt;")
         )
 
-        fecha_local = evento.get("FechaLocal") or "No disponible"
-        fecha_utc = evento.get("FechaUTC") or ""
-
         html = f"""
         <html>
-          <head><meta charset="utf-8"><title>SismoTrack</title></head>
+          <head>
+            <meta charset="utf-8">
+            <title>SismoTrack</title>
+          </head>
           <body style="font-family: Arial, sans-serif; padding: 24px;">
-            <h1>SismoTrack</h1>
-            <h4>Sistema de estimación temprana de intensidades (Chile)</h4>
+            <h1 style="margin-bottom: 6px;">SismoTrack</h1>
+            <div style="margin-bottom: 18px; color:#333;">
+              Sistema de estimación temprana de intensidades sísmicas (Chile)
+            </div>
 
-            <h2>Último sismo (API xor.cl, M ≥ {MIN_EVENT_MAGNITUDE})</h2>
+            <h2>Último sismo (API XOR | M ≥ {MIN_EVENT_MAGNITUDE})</h2>
             <ul>
-              <li><b>Fecha/Hora local:</b> {fecha_local}</li>
-              <li><b>Fecha/Hora UTC:</b> {fecha_utc or "No disponible"}</li>
+              <li><b>Fecha/Hora:</b> {evento.get("FechaHora","No disponible")}</li>
               <li><b>Latitud_sismo:</b> {evento["Latitud_sismo"]}</li>
               <li><b>Longitud_sismo:</b> {evento["Longitud_sismo"]}</li>
               <li><b>Profundidad (km):</b> {evento["Profundidad"]}</li>
               <li><b>Magnitud:</b> {evento["magnitud"]}</li>
-              <li><b>Referencia:</b> {ref}</li>
+              <li><b>Referencia:</b> {evento.get("Referencia") or "No disponible"}</li>
             </ul>
 
-            <p><b>Fuente evento:</b> <a href="{evento["Fuente_informe"]}" target="_blank">{evento["Fuente_informe"]}</a></p>
+            <div style="margin: 10px 0 18px 0;">
+              <b>Fuente:</b> <a href="{XOR_API_URL}" target="_blank">{XOR_API_URL}</a>
+            </div>
 
-            <hr/>
             <h2>Intensidades Mercalli estimadas (I ≥ {MIN_INTENSITY_TO_SHOW})</h2>
             {table_html}
 
             <h2 style="margin-top: 24px;">Mapa (Epicentro + localidades)</h2>
+            <div style="margin: 6px 0 12px 0; color:#333;">
+              El tamaño del círculo es proporcional a la intensidad y el color depende del rango.
+            </div>
+
+            <!-- ✅ 1) sin línea previa; y sin borde si no lo quieres -->
             <iframe
               srcdoc="{srcdoc}"
-              style="width:100%; height:650px; border:1px solid #ccc; border-radius:8px;"
+              style="width:100%; height:650px; border:0; border-radius:10px;"
               loading="lazy"
             ></iframe>
+
+            <div style="margin-top:16px;">
+              <a href="/intensidades/json">Ver JSON</a> |
+              <a href="/health">Health</a>
+            </div>
 
           </body>
         </html>
@@ -507,16 +622,16 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
         """
         return HTMLResponse(content=html, status_code=500)
 
+
 @app.get("/intensidades/json")
 def intensidades_json():
-    evento = fetch_latest_event()
+    evento = fetch_latest_event(MIN_EVENT_MAGNITUDE)
     preds, order = predict_intensidades(evento, MIN_INTENSITY_TO_SHOW)
     return JSONResponse(
         {
             "config": {
                 "MIN_EVENT_MAGNITUDE": MIN_EVENT_MAGNITUDE,
                 "MIN_INTENSITY_TO_SHOW": MIN_INTENSITY_TO_SHOW,
-                "SISMOS_API_URL": SISMOS_API_URL,
             },
             "evento": evento,
             "csv": CSV_PATH,
@@ -528,6 +643,7 @@ def intensidades_json():
         }
     )
 
+
 @app.get("/health")
 def health():
     status = {
@@ -536,7 +652,7 @@ def health():
         "model_exists": os.path.exists(MODEL_PATH),
         "model_path": MODEL_PATH,
         "model_url": MODEL_URL,
-        "SISMOS_API_URL": SISMOS_API_URL,
+        "XOR_API_URL": XOR_API_URL,
         "MIN_EVENT_MAGNITUDE": MIN_EVENT_MAGNITUDE,
         "MIN_INTENSITY_TO_SHOW": MIN_INTENSITY_TO_SHOW,
         "PRELOAD_MODEL_ON_STARTUP": PRELOAD_MODEL_ON_STARTUP,
@@ -545,6 +661,15 @@ def health():
     if status["model_exists"]:
         status["model_size_mb"] = round(os.path.getsize(MODEL_PATH) / (1024 * 1024), 2)
 
+    # test api
+    try:
+        r = requests.get(XOR_API_URL, headers=HEADERS, timeout=HTTP_TIMEOUT)
+        status["api_ok"] = r.ok
+        status["api_status_code"] = r.status_code
+    except Exception as e:
+        status["api_ok"] = False
+        status["api_error"] = str(e)
+
     try:
         _ = load_model()
         status["model_load_ok"] = True
@@ -552,21 +677,13 @@ def health():
         status["model_load_ok"] = False
         status["model_load_error"] = str(e)
 
-    # prueba rápida API
-    try:
-        ev = fetch_latest_event(MIN_EVENT_MAGNITUDE)
-        status["api_ok"] = True
-        status["api_last_local_date"] = ev.get("FechaLocal")
-        status["api_last_magnitude"] = ev.get("magnitud")
-    except Exception as e:
-        status["api_ok"] = False
-        status["api_error"] = str(e)
-
     return JSONResponse(status)
+
 
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8000"))
     uvicorn.run("app:app", host="0.0.0.0", port=port)
+
 
 
