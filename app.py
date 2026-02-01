@@ -481,7 +481,7 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
             <p><b>Fuente:</b> <a href="{evento["Fuente_informe"]}" target="_blank">{evento["Fuente_informe"]}</a></p>
 
             <hr/>
-            <h2>Intensidades estimadas (mayores o iguales a {MIN_INTENSITY_TO_SHOW})</h2>
+            <h2>Intensidades Mercalli estimadas (mayores o iguales a {MIN_INTENSITY_TO_SHOW})</h2>
             {table_html}
 
             <h2 style="margin-top: 24px;">Mapa (Epicentro + localidades)</h2>
