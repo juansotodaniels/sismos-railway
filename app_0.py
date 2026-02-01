@@ -7,6 +7,7 @@ import threading
 import requests
 import numpy as np
 import joblib
+import folium  # ✅ NUEVO
 
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, Query
@@ -15,7 +16,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 # ============================================================
 # CONFIGURACIÓN (MODIFICABLE)
 # ============================================================
-MIN_EVENT_MAGNITUDE = float(os.getenv("MIN_EVENT_MAGNITUDE", "0.0"))     # evento: M >=
+MIN_EVENT_MAGNITUDE = float(os.getenv("MIN_EVENT_MAGNITUDE", "0"))     # evento: M >=
 MIN_INTENSITY_TO_SHOW = int(os.getenv("MIN_INTENSITY_TO_SHOW", "2"))     # mostrar: I >=
 MAX_EVENTS_TO_SCAN = int(os.getenv("MAX_EVENTS_TO_SCAN", "25"))          # cuántos informes revisar
 DEFAULT_TABLE_ROWS = int(os.getenv("DEFAULT_TABLE_ROWS", "200"))         # filas mostradas en Home
@@ -262,6 +263,7 @@ def build_feature_matrix(evento: dict, locs: list[dict]):
     meta = []
     for loc in locs:
         dist = haversine_km(lat_s, lon_s, loc["Latitud_localidad"], loc["Longitud_localidad"])
+
         feats = {
             "Latitud_sismo": lat_s,
             "Longitud_sismo": lon_s,
@@ -272,15 +274,18 @@ def build_feature_matrix(evento: dict, locs: list[dict]):
             "distancia_epicentro": dist,
         }
         rows.append(feats)
-        meta.append(
-    {
-        "localidad": loc["localidad"],
-        "comuna": loc.get("comuna", ""),
-        "region": loc.get("region", ""),
-        "distancia_epicentro_km": int(round(dist)),
-    }
-)
 
+        # ✅ CAMBIO: agregamos lat/lon al meta para el mapa + distancia entera
+        meta.append(
+            {
+                "localidad": loc["localidad"],
+                "comuna": loc.get("comuna", ""),
+                "region": loc.get("region", ""),
+                "Latitud_localidad": loc["Latitud_localidad"],
+                "Longitud_localidad": loc["Longitud_localidad"],
+                "distancia_epicentro_km": int(round(dist)),
+            }
+        )
 
     model = load_model()
     order = list(model.feature_names_in_) if hasattr(model, "feature_names_in_") else FEATURES
@@ -323,7 +328,7 @@ def startup():
 def render_table(preds: list[dict], n: int) -> str:
     show = preds[:n]
     rows = "\n".join(
-        f"<tr><td>{i+1}</td>"
+        f"<tr><td style='text-align:center;'>{i+1}</td>"
         f"<td>{x['localidad']}</td>"
         f"<td>{x.get('comuna','')}</td>"
         f"<td>{x.get('region','')}</td>"
@@ -332,7 +337,7 @@ def render_table(preds: list[dict], n: int) -> str:
         for i, x in enumerate(show)
     )
     return f"""
-      <table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse;">
+      <table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;">
         <thead>
           <tr>
             <th>#</th>
@@ -340,7 +345,7 @@ def render_table(preds: list[dict], n: int) -> str:
             <th>Comuna</th>
             <th>Región</th>
             <th>Distancia al epicentro (km)</th>
-            <th>Intensidad</th>
+            <th>Intensidad (Mercalli)</th>
           </tr>
         </thead>
         <tbody>{rows}</tbody>
@@ -348,12 +353,99 @@ def render_table(preds: list[dict], n: int) -> str:
     """
 
 # -------------------------
+# ✅ NUEVO: Mapa Folium embebido
+# -------------------------
+def intensity_color(i: int) -> str:
+    if i >= 6:
+        return "#d32f2f"  # rojo
+    if i >= 4:
+        return "#f57c00"  # naranjo
+    return "#2e7d32"      # verde
+
+def intensity_radius(i: int) -> int:
+    return 4 + 3 * int(i)
+
+def build_map_html(evento: dict, preds: list[dict], n: int) -> str:
+    show = preds[:n]
+
+    lat_s = evento["Latitud_sismo"]
+    lon_s = evento["Longitud_sismo"]
+
+    # Crear mapa centrado inicialmente en el epicentro (luego haremos fit_bounds)
+    m = folium.Map(location=[lat_s, lon_s], zoom_start=6, tiles="OpenStreetMap")
+
+    # --- 3) Tooltip con datos del sismo al pasar el mouse ---
+    ref = evento.get("Referencia") or "No disponible"
+    tooltip_html = (
+        f"<div style='font-size:13px;'>"
+        f"<b>Sismo</b><br>"
+        f"<b>Magnitud:</b> {evento['magnitud']}<br>"
+        f"<b>Epicentro:</b> ({lat_s}, {lon_s})<br>"
+        f"<b>Referencia:</b> {ref}"
+        f"</div>"
+    )
+
+    folium.Marker(
+        location=[lat_s, lon_s],
+        tooltip=folium.Tooltip(tooltip_html, sticky=True),
+        popup=folium.Popup(
+            f"<b>Epicentro</b><br>Lat: {lat_s}<br>Lon: {lon_s}"
+            f"<br>Prof: {evento['Profundidad']} km<br>M: {evento['magnitud']}",
+            max_width=300
+        ),
+        icon=folium.Icon(color="red", icon="info-sign"),
+    ).add_to(m)
+
+    # Bounds: incluir epicentro + todas las localidades mostradas
+    bounds = [[lat_s, lon_s]]
+
+    for x in show:
+        i = int(x["intensidad_predicha"])
+        lat = float(x["Latitud_localidad"])
+        lon = float(x["Longitud_localidad"])
+
+        comuna = x.get("comuna") or "No disponible"
+        region = x.get("region") or "No disponible"
+        dist = x.get("distancia_epicentro_km", "")
+
+        popup = (
+            f"<b>{x['localidad']}</b><br>"
+            f"Comuna: {comuna}<br>"
+            f"Región: {region}<br>"
+            f"Distancia: {dist} km<br>"
+            f"Intensidad: <b>{i}</b>"
+        )
+
+        col = intensity_color(i)
+
+        folium.CircleMarker(
+            location=[lat, lon],
+            radius=intensity_radius(i),
+            color=col,
+            fill=True,
+            fill_color=col,
+            fill_opacity=0.55,
+            weight=2,
+            popup=folium.Popup(popup, max_width=320),
+            tooltip=f"{x['localidad']} (I={i})",
+        ).add_to(m)
+
+        bounds.append([lat, lon])
+
+    # ✅ Zoom automático para que se vean TODOS (máximo zoom posible sin cortar puntos)
+    if len(bounds) >= 2:
+        m.fit_bounds(bounds, padding=(20, 20))
+
+    return m.get_root().render()
+
+
+# -------------------------
 # Endpoints
 # -------------------------
 @app.get("/", response_class=HTMLResponse)
 def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
     """
-    HOME = resumen del sismo + tabla de intensidades (filtrada) en la MISMA página
+    HOME = resumen del sismo + tabla + mapa en la MISMA página
     """
     try:
         evento = fetch_latest_event()
@@ -363,10 +455,22 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
 
         table_html = render_table(preds, n)
 
+        # ✅ NUEVO: crear mapa y embebarlo con iframe srcdoc
+        map_html = build_map_html(evento, preds, n)
+        srcdoc = (
+    map_html.replace("&", "&amp;")
+            .replace('"', "&quot;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+    )
+
+
         html = f"""
         <html>
           <head><meta charset="utf-8"><title>Último sismo + intensidades</title></head>
           <body style="font-family: Arial, sans-serif; padding: 24px;">
+            <h1>SismoTrack</h1>
+            <h4>Sistema de estimacion temprana de intensidades de sismos (Chile)<h4>
             <h2>Último sismo (magnitud mayor o igual a {MIN_EVENT_MAGNITUDE})</h2>
             <ul>
               <li><b>Latitud_sismo:</b> {evento["Latitud_sismo"]}</li>
@@ -378,9 +482,18 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
             <p><b>Fuente:</b> <a href="{evento["Fuente_informe"]}" target="_blank">{evento["Fuente_informe"]}</a></p>
 
             <hr/>
-            <h2>Intensidades estimadas (mayores o iguales a {MIN_INTENSITY_TO_SHOW})</h2>
-
+            <h2>Intensidades Mercalli estimadas (mayores o iguales a {MIN_INTENSITY_TO_SHOW})</h2>
             {table_html}
+
+            <h2 style="margin-top: 24px;">Mapa (Epicentro + localidades)</h2>
+
+            <p>El tamaño del círculo es proporcional a la intensidad y el color depende del rango.</p>
+
+            <iframe
+              srcdoc="{srcdoc}"
+              style="width:100%; height:650px; border:1px solid #ccc; border-radius:8px;"
+              loading="lazy"
+            ></iframe>
 
           </body>
         </html>
@@ -417,7 +530,7 @@ def intensidades_only(n: int = Query(200, ge=1, le=20000)):
         <html>
           <head><meta charset="utf-8"><title>Intensidades</title></head>
           <body style="font-family: Arial, sans-serif; padding: 24px;">
-            <h2>Intensidades (mayores o iguales a {MIN_INTENSITY_TO_SHOW})</h2>
+            <h2>Intensidades (solo mayores o iguales a {MIN_INTENSITY_TO_SHOW})</h2>
             <p><b>Referencia:</b> {ref}</p>
             <p>Features: <code>{", ".join(order)}</code></p>
             {table_html}
