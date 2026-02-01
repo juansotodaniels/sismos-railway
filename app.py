@@ -16,7 +16,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 # CONFIGURACIÓN (MODIFICABLE)
 # ============================================================
 MIN_EVENT_MAGNITUDE = float(os.getenv("MIN_EVENT_MAGNITUDE", "0.0"))     # evento: M >=
-MIN_INTENSITY_TO_SHOW = int(os.getenv("MIN_INTENSITY_TO_SHOW", "2"))     # mostrar: I >=
+MIN_INTENSITY_TO_SHOW = int(os.getenv("MIN_INTENSITY_TO_SHOW", "4"))     # mostrar: I >=
 MAX_EVENTS_TO_SCAN = int(os.getenv("MAX_EVENTS_TO_SCAN", "25"))          # cuántos informes revisar
 DEFAULT_TABLE_ROWS = int(os.getenv("DEFAULT_TABLE_ROWS", "200"))         # filas mostradas en Home
 
