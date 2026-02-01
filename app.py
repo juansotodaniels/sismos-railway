@@ -328,7 +328,7 @@ def startup():
 def render_table(preds: list[dict], n: int) -> str:
     show = preds[:n]
     rows = "\n".join(
-        f"<tr><td>{i+1}</td>"
+        f"<tr><td style='text-align:center;'>{i+1}</td>"
         f"<td>{x['localidad']}</td>"
         f"<td>{x.get('comuna','')}</td>"
         f"<td>{x.get('region','')}</td>"
@@ -480,7 +480,7 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
             <p><b>Fuente:</b> <a href="{evento["Fuente_informe"]}" target="_blank">{evento["Fuente_informe"]}</a></p>
 
             <hr/>
-            <h2>Intensidades estimadas (solo mayores o iguales a {MIN_INTENSITY_TO_SHOW})</h2>
+            <h2>Intensidades estimadas (mayores o iguales a {MIN_INTENSITY_TO_SHOW})</h2>
             {table_html}
 
             <h2 style="margin-top: 24px;">Mapa (Epicentro + localidades)</h2>
