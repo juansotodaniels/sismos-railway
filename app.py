@@ -457,8 +457,8 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
             <h2>Intensidades estimadas (solo mayores o iguales a {MIN_INTENSITY_TO_SHOW})</h2>
             {table_html}
 
-            <hr/>
-            <h2>Mapa (Epicentro + localidades)</h2>
+            <h2 style="margin-top: 24px;">Mapa (Epicentro + localidades)</h2>
+
             <p>El tamaño del círculo es proporcional a la intensidad y el color depende del rango.</p>
 
             <iframe
