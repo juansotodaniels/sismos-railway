@@ -15,14 +15,13 @@ from fastapi.responses import HTMLResponse, JSONResponse
 # ============================================================
 # CONFIGURACIÓN (MODIFICABLE)
 # ============================================================
-MIN_EVENT_MAGNITUDE = float(os.getenv("MIN_EVENT_MAGNITUDE", "0.0"))
-MIN_INTENSITY_TO_SHOW = int(os.getenv("MIN_INTENSITY_TO_SHOW", "2"))
-MAX_EVENTS_TO_SCAN = int(os.getenv("MAX_EVENTS_TO_SCAN", "25"))
+MIN_EVENT_MAGNITUDE = float(os.getenv("MIN_EVENT_MAGNITUDE", "0.0"))     # evento: M >=
+MIN_INTENSITY_TO_SHOW = int(os.getenv("MIN_INTENSITY_TO_SHOW", "2"))     # mostrar: I >=
+MAX_EVENTS_TO_SCAN = int(os.getenv("MAX_EVENTS_TO_SCAN", "25"))          # cuántos informes revisar
+DEFAULT_TABLE_ROWS = int(os.getenv("DEFAULT_TABLE_ROWS", "200"))         # filas mostradas en Home
 
-# Pre-cargar el modelo al iniciar el contenedor (evita 500 en /intensidades)
 PRELOAD_MODEL_ON_STARTUP = os.getenv("PRELOAD_MODEL_ON_STARTUP", "1") == "1"
 
-# Timeout de descargas
 HTTP_TIMEOUT = int(os.getenv("HTTP_TIMEOUT", "25"))
 MODEL_DOWNLOAD_TIMEOUT = int(os.getenv("MODEL_DOWNLOAD_TIMEOUT", "600"))
 # ============================================================
@@ -30,7 +29,7 @@ MODEL_DOWNLOAD_TIMEOUT = int(os.getenv("MODEL_DOWNLOAD_TIMEOUT", "600"))
 BASE_URL = "https://www.sismologia.cl/"
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; RailwayBot/1.0; +https://railway.app)"}
 
-CSV_PATH = os.getenv("LOCALIDADES_CSV", "Localidades_Enero_2026_con_coords.csv")
+CSV_PATH = os.getenv("LOCALIDADES_CSV", "Localidades_Enero_2026_con_coords_region_comuna.csv")
 
 MODEL_PATH = os.getenv("MODEL_PATH", "Sismos_RF_joblib_Ene_2026.pkl")
 MODEL_URL = os.getenv(
@@ -191,7 +190,6 @@ def fetch_latest_event(min_mag: float = MIN_EVENT_MAGNITUDE) -> dict:
     links = soup.select('a[href^="sismicidad/informes/"]')
     if not links:
         links = soup.find_all("a", href=re.compile(r"sismicidad/informes/"))
-
     if not links:
         raise RuntimeError("No se encontraron links a informes de sismos en la portada.")
 
@@ -213,9 +211,7 @@ def fetch_latest_event(min_mag: float = MIN_EVENT_MAGNITUDE) -> dict:
         except Exception:
             continue
 
-    raise RuntimeError(
-        f"No se encontró un sismo con magnitud >= {min_mag} revisando {scanned} informes."
-    )
+    raise RuntimeError(f"No se encontró un sismo con magnitud >= {min_mag} revisando {scanned} informes.")
 
 # -------------------------
 # Modelo: descarga + carga (con lock)
@@ -308,7 +304,7 @@ def predict_intensidades(evento: dict, min_intensity: int = MIN_INTENSITY_TO_SHO
     return out, order
 
 # -------------------------
-# Startup: precarga del modelo (evita 500 en /intensidades)
+# Startup: precarga del modelo
 # -------------------------
 @app.on_event("startup")
 def startup():
@@ -321,102 +317,78 @@ def startup():
             print(f"[STARTUP] WARNING: no pude precargar modelo: {e}")
 
 # -------------------------
+# Render HTML tabla (reutilizable)
+# -------------------------
+def render_table(preds: list[dict], n: int) -> str:
+    show = preds[:n]
+    rows = "\n".join(
+        f"<tr><td>{i+1}</td>"
+        f"<td>{x['localidad']}</td>"
+        f"<td>{x.get('comuna','')}</td>"
+        f"<td>{x.get('region','')}</td>"
+        f"<td>{x['distancia_epicentro_km']}</td>"
+        f"<td><b>{x['intensidad_predicha']}</b></td></tr>"
+        for i, x in enumerate(show)
+    )
+    return f"""
+      <p>Mostrando <b>{len(show)}</b> filas. (cambia con <code>?n=500</code>)</p>
+      <table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse;">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Localidad</th>
+            <th>Comuna</th>
+            <th>Región</th>
+            <th>Distancia (km)</th>
+            <th>Intensidad</th>
+          </tr>
+        </thead>
+        <tbody>{rows}</tbody>
+      </table>
+    """
+
+# -------------------------
 # Endpoints
 # -------------------------
 @app.get("/", response_class=HTMLResponse)
-def home():
-    evento = fetch_latest_event()
-    ref = evento.get("Referencia") or "No disponible"
-
-    html = f"""
-    <html>
-      <head><meta charset="utf-8"><title>Último sismo</title></head>
-      <body style="font-family: Arial, sans-serif; padding: 24px;">
-        <h2>Último sismo (magnitud ≥ {MIN_EVENT_MAGNITUDE})</h2>
-        <ul>
-          <li><b>Latitud_sismo:</b> {evento["Latitud_sismo"]}</li>
-          <li><b>Longitud_sismo:</b> {evento["Longitud_sismo"]}</li>
-          <li><b>Profundidad (km):</b> {evento["Profundidad"]}</li>
-          <li><b>Magnitud:</b> {evento["magnitud"]}</li>
-          <li><b>Referencia:</b> {ref}</li>
-          <li><b>Informes revisados:</b> {evento.get("informes_revisados", "-")}</li>
-        </ul>
-        <p><b>Fuente:</b> <a href="{evento["Fuente_informe"]}" target="_blank">{evento["Fuente_informe"]}</a></p>
-
-        <hr/>
-        <p>
-          <a href="/intensidades">Ver localidades con intensidad ≥ {MIN_INTENSITY_TO_SHOW}</a> |
-          <a href="/intensidades/json">Ver JSON</a> |
-          <a href="/warmup">Warmup</a> |
-          <a href="/health">Health</a>
-        </p>
-      </body>
-    </html>
+def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
     """
-    return HTMLResponse(content=html)
-
-@app.get("/warmup")
-def warmup():
-    # fuerza descarga/carga (útil si desactivaste preload)
-    load_model()
-    return {"ok": True, "model_loaded": True}
-
-@app.get("/intensidades", response_class=HTMLResponse)
-def intensidades_html(n: int = Query(200, ge=1, le=20000)):
+    HOME = resumen del sismo + tabla de intensidades (filtrada) en la MISMA página
+    """
     try:
         evento = fetch_latest_event()
-        preds, order = predict_intensidades(evento)
-
-        show = preds[:n]
-        rows = "\n".join(
-            f"<tr><td>{i+1}</td>"
-            f"<td>{x['localidad']}</td>"
-            f"<td>{x.get('comuna','')}</td>"
-            f"<td>{x.get('region','')}</td>"
-            f"<td>{x['distancia_epicentro_km']}</td>"
-            f"<td><b>{x['intensidad_predicha']}</b></td></tr>"
-            for i, x in enumerate(show)
-        )
-
         ref = evento.get("Referencia") or "No disponible"
+
+        preds, order = predict_intensidades(evento, MIN_INTENSITY_TO_SHOW)
+
+        table_html = render_table(preds, n)
 
         html = f"""
         <html>
-          <head><meta charset="utf-8"><title>Intensidades</title></head>
+          <head><meta charset="utf-8"><title>Último sismo + intensidades</title></head>
           <body style="font-family: Arial, sans-serif; padding: 24px;">
-            <h2>Intensidades (solo ≥ {MIN_INTENSITY_TO_SHOW})</h2>
-            <p>
-              <b>Sismo:</b> lat {evento["Latitud_sismo"]}, lon {evento["Longitud_sismo"]},
-              prof {evento["Profundidad"]} km, M {evento["magnitud"]}<br/>
-              <b>Referencia:</b> {ref}
-              (<a href="{evento["Fuente_informe"]}" target="_blank">fuente</a>)
-            </p>
+            <h2>Último sismo (magnitud ≥ {MIN_EVENT_MAGNITUDE})</h2>
+            <ul>
+              <li><b>Latitud_sismo:</b> {evento["Latitud_sismo"]}</li>
+              <li><b>Longitud_sismo:</b> {evento["Longitud_sismo"]}</li>
+              <li><b>Profundidad (km):</b> {evento["Profundidad"]}</li>
+              <li><b>Magnitud:</b> {evento["magnitud"]}</li>
+              <li><b>Referencia:</b> {ref}</li>
+              <li><b>Informes revisados:</b> {evento.get("informes_revisados", "-")}</li>
+            </ul>
+            <p><b>Fuente:</b> <a href="{evento["Fuente_informe"]}" target="_blank">{evento["Fuente_informe"]}</a></p>
 
+            <hr/>
+            <h2>Intensidades estimadas (solo ≥ {MIN_INTENSITY_TO_SHOW})</h2>
             <p>
               ✅ Intensidades redondeadas al entero más cercano<br/>
               ✅ Filtro: intensidad ≥ <b>{MIN_INTENSITY_TO_SHOW}</b><br/>
-              ✅ Evento: magnitud ≥ <b>{MIN_EVENT_MAGNITUDE}</b><br/>
               Features usadas (orden): <code>{", ".join(order)}</code>
             </p>
 
-            <p>Mostrando <b>{len(show)}</b> filas. (cambia con <code>?n=500</code>)</p>
-
-            <table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse;">
-              <thead>
-                <tr>
-                  <th>#</th>
-                  <th>Localidad</th>
-                  <th>Comuna</th>
-                  <th>Región</th>
-                  <th>Distancia (km)</th>
-                  <th>Intensidad</th>
-                </tr>
-              </thead>
-              <tbody>{rows}</tbody>
-            </table>
+            {table_html}
 
             <p style="margin-top: 16px;">
-              <a href="/">Volver</a> |
               <a href="/intensidades/json">Ver JSON</a> |
               <a href="/health">Health</a>
             </p>
@@ -426,15 +398,54 @@ def intensidades_html(n: int = Query(200, ge=1, le=20000)):
         return HTMLResponse(content=html)
 
     except Exception as e:
-        # En vez de 500 vacío, mostramos el error
         err = str(e)
         html = f"""
         <html>
           <head><meta charset="utf-8"><title>Error</title></head>
           <body style="font-family: Arial, sans-serif; padding: 24px;">
-            <h2>Ocurrió un error al calcular intensidades</h2>
-            <p style="color: #b00020;"><b>Error:</b> {err}</p>
-            <p>Revisa <a href="/health">/health</a> para ver si el modelo y CSV están OK.</p>
+            <h2>Ocurrió un error al construir la página</h2>
+            <p style="color:#b00020;"><b>Error:</b> {err}</p>
+            <p>Revisa <a href="/health">/health</a>.</p>
+          </body>
+        </html>
+        """
+        return HTMLResponse(content=html, status_code=500)
+
+@app.get("/intensidades", response_class=HTMLResponse)
+def intensidades_only(n: int = Query(200, ge=1, le=20000)):
+    """
+    Mantengo este endpoint por compatibilidad, pero ya no es necesario.
+    """
+    try:
+        evento = fetch_latest_event()
+        preds, order = predict_intensidades(evento, MIN_INTENSITY_TO_SHOW)
+
+        ref = evento.get("Referencia") or "No disponible"
+        table_html = render_table(preds, n)
+
+        html = f"""
+        <html>
+          <head><meta charset="utf-8"><title>Intensidades</title></head>
+          <body style="font-family: Arial, sans-serif; padding: 24px;">
+            <h2>Intensidades (solo ≥ {MIN_INTENSITY_TO_SHOW})</h2>
+            <p><b>Referencia:</b> {ref}</p>
+            <p>Features: <code>{", ".join(order)}</code></p>
+            {table_html}
+            <p style="margin-top: 16px;"><a href="/">Volver</a></p>
+          </body>
+        </html>
+        """
+        return HTMLResponse(content=html)
+
+    except Exception as e:
+        err = str(e)
+        html = f"""
+        <html>
+          <head><meta charset="utf-8"><title>Error</title></head>
+          <body style="font-family: Arial, sans-serif; padding: 24px;">
+            <h2>Error al calcular intensidades</h2>
+            <p style="color:#b00020;"><b>Error:</b> {err}</p>
+            <p>Revisa <a href="/health">/health</a>.</p>
             <p><a href="/">Volver</a></p>
           </body>
         </html>
@@ -444,8 +455,7 @@ def intensidades_html(n: int = Query(200, ge=1, le=20000)):
 @app.get("/intensidades/json")
 def intensidades_json():
     evento = fetch_latest_event()
-    preds, order = predict_intensidades(evento)
-
+    preds, order = predict_intensidades(evento, MIN_INTENSITY_TO_SHOW)
     return JSONResponse(
         {
             "config": {
@@ -475,6 +485,7 @@ def health():
         "MIN_INTENSITY_TO_SHOW": MIN_INTENSITY_TO_SHOW,
         "MAX_EVENTS_TO_SCAN": MAX_EVENTS_TO_SCAN,
         "PRELOAD_MODEL_ON_STARTUP": PRELOAD_MODEL_ON_STARTUP,
+        "DEFAULT_TABLE_ROWS": DEFAULT_TABLE_ROWS,
     }
     if status["model_exists"]:
         status["model_size_mb"] = round(os.path.getsize(MODEL_PATH) / (1024 * 1024), 2)
@@ -492,4 +503,3 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8000"))
     uvicorn.run("app:app", host="0.0.0.0", port=port)
-
