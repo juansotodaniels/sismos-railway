@@ -326,8 +326,8 @@ def render_table(preds: list[dict], n: int) -> str:
         f"<td>{x['localidad']}</td>"
         f"<td>{x.get('comuna','')}</td>"
         f"<td>{x.get('region','')}</td>"
-        f"<td>{x['distancia_epicentro_km']}</td>"
-        f"<td><b>{x['intensidad_predicha']}</b></td></tr>"
+        f"<td style='text-align:center;'>{x['distancia_epicentro_km']}</td>"
+        f"<td style='text-align:center;'><b>{x['intensidad_predicha']}</b></td></tr>"
         for i, x in enumerate(show)
     )
     return f"""
@@ -377,7 +377,7 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
             <p><b>Fuente:</b> <a href="{evento["Fuente_informe"]}" target="_blank">{evento["Fuente_informe"]}</a></p>
 
             <hr/>
-            <h2>Intensidades estimadas (solo ≥ {MIN_INTENSITY_TO_SHOW})</h2>
+            <h2>Intensidades estimadas (solo mayores o iguales a {MIN_INTENSITY_TO_SHOW})</h2>
 
             {table_html}
 
@@ -416,7 +416,7 @@ def intensidades_only(n: int = Query(200, ge=1, le=20000)):
         <html>
           <head><meta charset="utf-8"><title>Intensidades</title></head>
           <body style="font-family: Arial, sans-serif; padding: 24px;">
-            <h2>Intensidades (solo ≥ {MIN_INTENSITY_TO_SHOW})</h2>
+            <h2>Intensidades (solo mayores o iguales a {MIN_INTENSITY_TO_SHOW})</h2>
             <p><b>Referencia:</b> {ref}</p>
             <p>Features: <code>{", ".join(order)}</code></p>
             {table_html}
