@@ -470,7 +470,7 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
           <head><meta charset="utf-8"><title>Último sismo + intensidades</title></head>
           <body style="font-family: Arial, sans-serif; padding: 24px;">
             <h1>SismoTrack</h1>
-            <h3>Sistema de alerta temprana de Intensidades de Sismos (Chile)<h3>
+            <h4>Sistema de estimacion temprana de intensidades de sismos (Chile)<h4>
             <h2>Último sismo (magnitud mayor o igual a {MIN_EVENT_MAGNITUDE})</h2>
             <ul>
               <li><b>Latitud_sismo:</b> {evento["Latitud_sismo"]}</li>
