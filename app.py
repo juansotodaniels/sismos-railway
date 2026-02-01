@@ -371,12 +371,23 @@ def build_map_html(evento: dict, preds: list[dict], n: int) -> str:
     lat_s = evento["Latitud_sismo"]
     lon_s = evento["Longitud_sismo"]
 
+    # Crear mapa centrado inicialmente en el epicentro (luego haremos fit_bounds)
     m = folium.Map(location=[lat_s, lon_s], zoom_start=6, tiles="OpenStreetMap")
 
-    # Epicentro
+    # --- 3) Tooltip con datos del sismo al pasar el mouse ---
+    ref = evento.get("Referencia") or "No disponible"
+    tooltip_html = (
+        f"<div style='font-size:13px;'>"
+        f"<b>Sismo</b><br>"
+        f"<b>Magnitud:</b> {evento['magnitud']}<br>"
+        f"<b>Epicentro:</b> ({lat_s}, {lon_s})<br>"
+        f"<b>Referencia:</b> {ref}"
+        f"</div>"
+    )
+
     folium.Marker(
         location=[lat_s, lon_s],
-        tooltip="Epicentro",
+        tooltip=folium.Tooltip(tooltip_html, sticky=True),
         popup=folium.Popup(
             f"<b>Epicentro</b><br>Lat: {lat_s}<br>Lon: {lon_s}"
             f"<br>Prof: {evento['Profundidad']} km<br>M: {evento['magnitud']}",
@@ -385,7 +396,9 @@ def build_map_html(evento: dict, preds: list[dict], n: int) -> str:
         icon=folium.Icon(color="red", icon="info-sign"),
     ).add_to(m)
 
-    # Localidades
+    # Bounds: incluir epicentro + todas las localidades mostradas
+    bounds = [[lat_s, lon_s]]
+
     for x in show:
         i = int(x["intensidad_predicha"])
         lat = float(x["Latitud_localidad"])
@@ -417,7 +430,14 @@ def build_map_html(evento: dict, preds: list[dict], n: int) -> str:
             tooltip=f"{x['localidad']} (I={i})",
         ).add_to(m)
 
+        bounds.append([lat, lon])
+
+    # ✅ Zoom automático para que se vean TODOS (máximo zoom posible sin cortar puntos)
+    if len(bounds) >= 2:
+        m.fit_bounds(bounds, padding=(20, 20))
+
     return m.get_root().render()
+
 
 # -------------------------
 # Endpoints
@@ -437,7 +457,13 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
 
         # ✅ NUEVO: crear mapa y embebarlo con iframe srcdoc
         map_html = build_map_html(evento, preds, n)
-        srcdoc = map_html.replace("&", "&amp;").replace('"', "&quot;")
+        srcdoc = (
+    map_html.replace("&", "&amp;")
+            .replace('"', "&quot;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+    )
+
 
         html = f"""
         <html>
