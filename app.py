@@ -2,7 +2,6 @@ import os
 import re
 import csv
 import math
-import urllib.request
 
 import requests
 import numpy as np
@@ -17,10 +16,10 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; RailwayBot/1.0; +https://rail
 
 CSV_PATH = os.getenv("LOCALIDADES_CSV", "Localidades_Enero_2026_con_coords.csv")
 
-# El modelo se guardará localmente en el contenedor con este nombre
+# Ruta local dentro del contenedor (NO subas el PKL al repo)
 MODEL_PATH = os.getenv("MODEL_PATH", "Sismos_RF_joblib_Ene_2026.pkl")
 
-# Link directo a descarga (Google Drive)
+# Link directo a Drive (tu link)
 MODEL_URL = os.getenv(
     "MODEL_URL",
     "https://drive.google.com/uc?export=download&id=198obnKfjpyomMDD4DivcooQUulv5eZGX"
@@ -30,7 +29,7 @@ app = FastAPI(title="Último sismo + distancias + intensidades (RF)")
 
 
 # -------------------------
-# Utilidades
+# Utilidades numéricas / geográficas
 # -------------------------
 def _to_float(s: str) -> float:
     s = str(s).strip().replace(",", ".")
@@ -39,10 +38,9 @@ def _to_float(s: str) -> float:
 
 def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """
-    Distancia Haversine (Tierra como esfera).
-    Retorna km.
+    Distancia Haversine (Tierra como esfera). Retorna km.
     """
-    R = 6371.0  # radio medio Tierra en km
+    R = 6371.0
     phi1 = math.radians(lat1)
     phi2 = math.radians(lat2)
     dphi = math.radians(lat2 - lat1)
@@ -62,7 +60,7 @@ def detect_delimiter(sample_text: str) -> str:
 
 
 # -------------------------
-# Scraping último sismo
+# Scraping: último sismo
 # -------------------------
 def fetch_latest_event() -> dict:
     r = requests.get(BASE_URL, headers=HEADERS, timeout=20)
@@ -99,7 +97,7 @@ def fetch_latest_event() -> dict:
 
 
 # -------------------------
-# Lectura localidades
+# Lectura CSV: localidades
 # -------------------------
 def read_localidades(csv_path: str) -> list[dict]:
     if not os.path.exists(csv_path):
@@ -150,20 +148,71 @@ def read_localidades(csv_path: str) -> list[dict]:
 
 
 # -------------------------
-# Modelo (descarga + cache)
+# Descarga Google Drive robusta (virus scan)
 # -------------------------
 MODEL = None
 
 
+def _looks_like_html(b: bytes) -> bool:
+    head = b[:400].lower()
+    return head.startswith(b"<!doctype html") or head.startswith(b"<html") or b"<html" in head
+
+
 def ensure_model():
     """
-    Descarga el modelo desde Google Drive si no existe en el filesystem del contenedor.
+    Descarga el modelo desde Google Drive si no existe localmente.
+    Maneja el 'virus scan warning' (Drive devuelve HTML + token confirm).
     """
-    if not os.path.exists(MODEL_PATH):
-        print(f"[MODEL] No existe {MODEL_PATH}. Descargando desde Google Drive...")
-        # Descarga directa
-        urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
-        print("[MODEL] Modelo descargado correctamente.")
+    if os.path.exists(MODEL_PATH) and os.path.getsize(MODEL_PATH) > 1024 * 1024:
+        return  # ya está y pesa razonablemente
+
+    session = requests.Session()
+    session.headers.update(HEADERS)
+
+    def get_bytes(url: str) -> bytes:
+        resp = session.get(url, timeout=90, allow_redirects=True)
+        resp.raise_for_status()
+        return resp.content
+
+    print(f"[MODEL] Descargando modelo desde: {MODEL_URL}")
+    content = get_bytes(MODEL_URL)
+
+    # Si Drive devolvió HTML (warning), extrae confirm token y reintenta
+    if _looks_like_html(content):
+        html = content.decode("utf-8", errors="ignore")
+
+        # En el HTML suele aparecer confirm=XXXX
+        m = re.search(r"confirm=([0-9A-Za-z_]+)", html)
+        if not m:
+            # fallback: algunas variantes
+            m = re.search(r"confirm=([0-9A-Za-z]+)", html)
+
+        if not m:
+            raise RuntimeError(
+                "Google Drive devolvió una página HTML (probable verificación de virus) y "
+                "no pude extraer el token 'confirm'. "
+                "Recomendación: usar GitHub Releases o un storage con descarga directa."
+            )
+
+        token = m.group(1)
+        sep = "&" if "?" in MODEL_URL else "?"
+        url2 = f"{MODEL_URL}{sep}confirm={token}"
+        print("[MODEL] Virus-scan warning detectado. Reintentando con confirm token...")
+        content = get_bytes(url2)
+
+        if _looks_like_html(content):
+            raise RuntimeError(
+                "Sigo recibiendo HTML desde Google Drive en vez del archivo binario .pkl. "
+                "Drive podría estar bloqueando la descarga automática. "
+                "Solución: GitHub Releases (recomendado) o un link directo distinto."
+            )
+
+    # Guardar modelo
+    with open(MODEL_PATH, "wb") as f:
+        f.write(content)
+
+    size_mb = os.path.getsize(MODEL_PATH) / (1024 * 1024)
+    print(f"[MODEL] Modelo guardado en {MODEL_PATH} ({size_mb:.2f} MB).")
 
 
 def load_model():
@@ -217,7 +266,7 @@ def build_feature_matrix(evento: dict, locs: list[dict]):
 
     model = load_model()
 
-    # Respetar orden de features si el modelo lo trae (sklearn)
+    # Respetar orden si el modelo lo trae (sklearn)
     if hasattr(model, "feature_names_in_"):
         order = list(model.feature_names_in_)
     else:
@@ -242,12 +291,7 @@ def predict_intensidades(evento: dict):
         except Exception:
             pred_val = str(pred_val)
 
-        out.append(
-            {
-                **m,
-                "intensidad_predicha": pred_val,
-            }
-        )
+        out.append({**m, "intensidad_predicha": pred_val})
 
     out.sort(key=lambda x: x["distancia_epicentro_km"])
     return out, order
@@ -274,7 +318,8 @@ def home():
         <hr/>
         <p>
           <a href="/intensidades">Ver intensidades por localidad</a> |
-          <a href="/intensidades/json">Ver JSON</a>
+          <a href="/intensidades/json">Ver JSON</a> |
+          <a href="/health">Health</a>
         </p>
       </body>
     </html>
@@ -358,7 +403,37 @@ def intensidades_json():
     )
 
 
+@app.get("/health")
+def health():
+    """
+    Endpoint simple para diagnosticar:
+    - existencia del CSV
+    - existencia/tamaño del PKL
+    - posibilidad de cargar modelo
+    """
+    status = {
+        "csv_exists": os.path.exists(CSV_PATH),
+        "csv_path": CSV_PATH,
+        "model_exists": os.path.exists(MODEL_PATH),
+        "model_path": MODEL_PATH,
+        "model_url": MODEL_URL,
+    }
+    if status["model_exists"]:
+        status["model_size_mb"] = round(os.path.getsize(MODEL_PATH) / (1024 * 1024), 2)
+
+    # intenta cargar el modelo (sin predecir)
+    try:
+        _ = load_model()
+        status["model_load_ok"] = True
+    except Exception as e:
+        status["model_load_ok"] = False
+        status["model_load_error"] = str(e)
+
+    return JSONResponse(status)
+
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8000"))
     uvicorn.run("app:app", host="0.0.0.0", port=port)
+
