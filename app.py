@@ -345,7 +345,7 @@ def render_table(preds: list[dict], n: int) -> str:
             <th>Comuna</th>
             <th>Región</th>
             <th>Distancia al epicentro (km)</th>
-            <th>Intensidad</th>
+            <th>Intensidad (Mercalli)</th>
           </tr>
         </thead>
         <tbody>{rows}</tbody>
