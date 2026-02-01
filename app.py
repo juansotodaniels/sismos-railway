@@ -211,7 +211,7 @@ def fetch_latest_event(min_mag: float = MIN_EVENT_MAGNITUDE) -> dict:
         except Exception:
             continue
 
-    raise RuntimeError(f"No se encontró un sismo con magnitud >= {min_mag} revisando {scanned} informes.")
+    raise RuntimeError(f"No se encontró un sismo con magnitud mayor o igual a {min_mag} revisando {scanned} informes.")
 
 # -------------------------
 # Modelo: descarga + carga (con lock)
@@ -367,7 +367,7 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
         <html>
           <head><meta charset="utf-8"><title>Último sismo + intensidades</title></head>
           <body style="font-family: Arial, sans-serif; padding: 24px;">
-            <h2>Último sismo (magnitud ≥ {MIN_EVENT_MAGNITUDE})</h2>
+            <h2>Último sismo (magnitud mayor o igual a {MIN_EVENT_MAGNITUDE})</h2>
             <ul>
               <li><b>Latitud_sismo:</b> {evento["Latitud_sismo"]}</li>
               <li><b>Longitud_sismo:</b> {evento["Longitud_sismo"]}</li>
