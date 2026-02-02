@@ -635,7 +635,7 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
             </ul>
 
             <div style="margin: 10px 0 18px 0;">
-              <b>Fuente:</b> <a href="{XOR_API_URL}" target="_blank">{XOR_API_URL}</a>
+              <b>Fuente:</b> <a href="https://www.sismologia.cl/" target="_blank">https://www.sismologia.cl/</a>
             </div>
 
             <h2>Intensidades Mercalli estimadas mayores a {MIN_INTENSITY_TO_SHOW}</h2>
