@@ -636,19 +636,20 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
     <html>
       <head>
         <meta charset="utf-8">
-        <title>SismoTrack</title>
+        <title>YATI</title>
       </head>
       <body style="font-family: Arial, sans-serif; padding: 24px;">
 
         <div style="display:flex; align-items:center; gap:16px; margin-bottom:18px;">
           <img src="/static/logo.png" alt="logo" style="height:180px; width:auto;">
           <div>
-            <h1 style="margin:0;">YATI</h1>
+            <h1>Y<span style="color:#f57c00;">A</span>T<span style="color:#f57c00;">I</span></h1>
+
             <div style="color:#555;">Sistema de predicción de intesidad sísmica (Chile)</div>
           </div>
         </div>
 
-        <h2>Último sismo de magnitud igual o mayor a {MIN_EVENT_MAGNITUDE} en las últimas 48 hrs.</h2>
+        <h2>Último sismo de magnitud igual o mayor a {MIN_EVENT_MAGNITUDE} en 48 hrs.</h2>
         <ul>
           <li><b>Fecha/Hora:</b> {evento.get("FechaHora","No disponible")}</li>
           <li><b>Latitud_sismo:</b> {evento["Latitud_sismo"]}</li>
