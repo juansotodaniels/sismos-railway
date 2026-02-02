@@ -15,8 +15,8 @@ from fastapi.responses import HTMLResponse, JSONResponse
 # ============================================================
 # CONFIGURACIÓN (MODIFICABLE)
 # ============================================================
-MIN_EVENT_MAGNITUDE = float(os.getenv("MIN_EVENT_MAGNITUDE", "0"))          # evento: M >=
-MIN_INTENSITY_TO_SHOW = int(os.getenv("MIN_INTENSITY_TO_SHOW", "2"))        # mostrar: I >=
+MIN_EVENT_MAGNITUDE = float(os.getenv("MIN_EVENT_MAGNITUDE", "4"))          # evento: M >=
+MIN_INTENSITY_TO_SHOW = int(os.getenv("MIN_INTENSITY_TO_SHOW", "3"))        # mostrar: I >=
 DEFAULT_TABLE_ROWS = int(os.getenv("DEFAULT_TABLE_ROWS", "200"))            # filas mostradas en Home
 
 PRELOAD_MODEL_ON_STARTUP = os.getenv("PRELOAD_MODEL_ON_STARTUP", "1") == "1"
