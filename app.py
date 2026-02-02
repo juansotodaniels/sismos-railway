@@ -640,10 +640,10 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
       <body style="font-family: Arial, sans-serif; padding: 24px;">
 
         <div style="display:flex; align-items:center; gap:16px; margin-bottom:18px;">
-          <img src="/static/logo.png" alt="logo" style="height:90px; width:auto;">
+          <img src="/static/logo.png" alt="logo" style="height:270px; width:auto;">
           <div>
-            <h1 style="margin:0;">SismoTrack</h1>
-            <div style="color:#555;">Sistema de estimación temprana de intensidades sísmicas (Chile)</div>
+            <h1 style="margin:0;">YATI</h1>
+            <div style="color:#555;">Sistema de predicción de intesidad sísmica (Chile)</div>
           </div>
         </div>
 
