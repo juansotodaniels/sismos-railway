@@ -624,7 +624,7 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
               Sistema de estimación temprana de intensidades sísmicas (Chile)
             </div>
 
-            <h2>Último sismo (API XOR | M ≥ {MIN_EVENT_MAGNITUDE})</h2>
+            <h2>Último sismo de magnitud igual o mayor a {MIN_EVENT_MAGNITUDE}) en las últimas 48 hrs.</h2>
             <ul>
               <li><b>Fecha/Hora:</b> {evento.get("FechaHora","No disponible")}</li>
               <li><b>Latitud_sismo:</b> {evento["Latitud_sismo"]}</li>
@@ -638,7 +638,7 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
               <b>Fuente:</b> <a href="{XOR_API_URL}" target="_blank">{XOR_API_URL}</a>
             </div>
 
-            <h2>Intensidades Mercalli estimadas (I ≥ {MIN_INTENSITY_TO_SHOW})</h2>
+            <h2>Intensidades Mercalli estimadas mayores a {MIN_INTENSITY_TO_SHOW}</h2>
             {table_html}
 
             <h2 style="margin-top: 24px;">Mapa (Epicentro + localidades)</h2>
