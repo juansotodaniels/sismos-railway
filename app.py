@@ -624,7 +624,7 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
               Sistema de estimación temprana de intensidades sísmicas (Chile)
             </div>
 
-            <h2>Último sismo de magnitud igual o mayor a {MIN_EVENT_MAGNITUDE}) en las últimas 48 hrs.</h2>
+            <h2>Último sismo de magnitud igual o mayor a {MIN_EVENT_MAGNITUDE} en las últimas 48 hrs.</h2>
             <ul>
               <li><b>Fecha/Hora:</b> {evento.get("FechaHora","No disponible")}</li>
               <li><b>Latitud_sismo:</b> {evento["Latitud_sismo"]}</li>
