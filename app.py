@@ -107,7 +107,7 @@ def parse_datetime_flexible(value):
             ts = int(s)
             if len(s) == 13:
                 ts = ts / 1000
-            return datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S UTC")
+            return datetime.utcfromtimestamp(ts).strftime("%d-%m-%Y %H:%M:%S UTC")
         except Exception:
             pass
 
@@ -125,7 +125,7 @@ def parse_datetime_flexible(value):
     for fmt in candidates:
         try:
             dt = datetime.strptime(s, fmt)
-            return dt.strftime("%Y-%m-%d %H:%M:%S")
+            return dt.strftime("%d-%m-%Y %H:%M:%S")
         except Exception:
             continue
 
