@@ -30,6 +30,7 @@ XOR_API_URL = os.getenv("XOR_API_URL", "https://api.xor.cl/sismo/recent")
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; RailwayBot/1.0; +https://railway.app)"}
 
+# CSV con localidades y coords (se usa para predecir intensidades por localidad)
 CSV_PATH = os.getenv("LOCALIDADES_CSV", "Localidades_Enero_2026_con_coords.csv")
 
 MODEL_PATH = os.getenv("MODEL_PATH", "Sismos_RF_joblib_Ene_2026.pkl")
@@ -100,7 +101,7 @@ def parse_datetime_flexible(value):
 
     s = str(value).strip()
 
-    # si viene epoch
+    # epoch (10 o 13 dígitos)
     if s.isdigit() and len(s) in (10, 13):
         try:
             ts = int(s)
@@ -110,10 +111,11 @@ def parse_datetime_flexible(value):
         except Exception:
             pass
 
-    # ISO / variantes
     candidates = [
         "%Y-%m-%dT%H:%M:%S.%fZ",
         "%Y-%m-%dT%H:%M:%SZ",
+        "%Y-%m-%dT%H:%M:%S.%f%z",
+        "%Y-%m-%dT%H:%M:%S%z",
         "%Y-%m-%dT%H:%M:%S",
         "%Y-%m-%d %H:%M:%S",
         "%d-%m-%Y %H:%M:%S",
@@ -146,7 +148,6 @@ def extract_lat_lon(ev: dict):
     if lat is not None and lon is not None:
         return lat, lon
 
-    # coords-like dict
     for k in ["coords", "coord", "coordinate", "coordinates", "location", "pos", "position"]:
         obj = safe_get(ev, [k])
         if isinstance(obj, dict):
@@ -155,7 +156,6 @@ def extract_lat_lon(ev: dict):
             if lat2 is not None and lon2 is not None:
                 return lat2, lon2
         elif isinstance(obj, (list, tuple)) and len(obj) >= 2:
-            # podría venir [lat, lon] o [lon, lat]; probamos heurística simple:
             a, b = obj[0], obj[1]
             try:
                 a_f = _to_float(a); b_f = _to_float(b)
@@ -166,23 +166,19 @@ def extract_lat_lon(ev: dict):
             except Exception:
                 pass
 
-    # GeoJSON geometry
     geom = safe_get(ev, ["geometry"])
     if isinstance(geom, dict):
         coords = safe_get(geom, ["coordinates"])
         if isinstance(coords, (list, tuple)) and len(coords) >= 2:
-            # GeoJSON => [lon, lat]
-            return coords[1], coords[0]
+            return coords[1], coords[0]  # GeoJSON => [lon, lat]
 
     return None, None
-
 
 def extract_magnitude(ev: dict):
     """
     Soporta magnitud como:
     - número/string
-    - dict {"value":4.1,"measure_unit":"Ml"} (como CSN)
-    - dict {"mag":...} etc
+    - dict {"value":4.1,"measure_unit":"Ml"} (estilo CSN)
     """
     mag = safe_get(ev, ["magnitude", "magnitud", "mag", "m"])
     mag_unit = None
@@ -193,9 +189,48 @@ def extract_magnitude(ev: dict):
 
     return mag, mag_unit
 
+def extract_datetime(ev: dict):
+    """
+    Busca fecha/hora en múltiples claves comunes, incluyendo estilo CSN:
+    - local_date / utc_date
+    - date/datetime/time/timestamp/created_at/updated_at
+    También soporta que venga anidado como dict.
+    """
+    dt_raw = (
+        safe_get(ev, ["local_date", "fecha_local", "hora_local", "localdatetime"]) or
+        safe_get(ev, ["utc_date", "fecha_utc", "hora_utc", "utcdatetime"]) or
+        safe_get(ev, ["date", "datetime", "time", "timestamp", "created_at", "updated_at"]) or
+        safe_get(ev, ["fecha", "hora"])
+    )
+
+    if isinstance(dt_raw, dict):
+        dt_raw = (
+            safe_get(dt_raw, ["local_date", "utc_date", "date", "datetime", "time", "timestamp", "value"])
+            or str(dt_raw)
+        )
+
+    return parse_datetime_flexible(dt_raw) or "No disponible"
+
+def extract_georef(ev: dict):
+    """
+    Extrae referencia geográfica/ubicación del evento desde varias claves:
+    - geo_reference (CSN)
+    - reference/ref/place/location/ubicacion
+    - también soporta dict anidado
+    """
+    g = (
+        safe_get(ev, ["geo_reference", "georeference", "reference", "ref", "place", "location", "ubicacion", "zona"]) or
+        safe_get(ev, ["georef", "geo_ref"])
+    )
+
+    if isinstance(g, dict):
+        g = safe_get(g, ["geo_reference", "reference", "place", "location", "value"]) or str(g)
+
+    return _clean_txt(g) or "No disponible"
+
 
 # -------------------------
-# CSV: localidades
+# CSV: localidades (para predicción)
 # -------------------------
 def read_localidades(csv_path: str) -> list[dict]:
     if not os.path.exists(csv_path):
@@ -256,39 +291,17 @@ def read_localidades(csv_path: str) -> list[dict]:
         raise RuntimeError("No se pudieron leer localidades válidas desde el CSV.")
     return locs
 
-def referencia_por_localidad_mas_cercana(evento: dict, locs: list[dict]) -> str | None:
-    lat_s = evento["Latitud_sismo"]
-    lon_s = evento["Longitud_sismo"]
-
-    best = None
-    best_d = float("inf")
-    for loc in locs:
-        d = haversine_km(lat_s, lon_s, loc["Latitud_localidad"], loc["Longitud_localidad"])
-        if d < best_d:
-            best_d = d
-            best = loc
-
-    if best is None:
-        return None
-
-    comuna = best.get("comuna") or "No disponible"
-    region = best.get("region") or "No disponible"
-    return f"{int(round(best_d))} km de {best['localidad']} (Comuna: {comuna}, Región: {region})"
-
 
 # -------------------------
 # API XOR: último sismo >= magnitud mínima
+#   ✅ Usa SOLO la referencia geográfica del JSON
+#   ❌ NO calcula localidad más cercana
 # -------------------------
 def fetch_latest_event(min_mag: float = MIN_EVENT_MAGNITUDE) -> dict:
-    """
-    Lee la lista de sismos desde XOR_API_URL
-    y retorna el más reciente que cumpla magnitud >= min_mag.
-    """
     resp = requests.get(XOR_API_URL, headers=HEADERS, timeout=HTTP_TIMEOUT)
     resp.raise_for_status()
     data = resp.json()
 
-    # puede venir como lista o como dict con "data"/"events"/etc.
     events = None
     if isinstance(data, list):
         events = data
@@ -314,19 +327,8 @@ def fetch_latest_event(min_mag: float = MIN_EVENT_MAGNITUDE) -> dict:
         mag_raw, mag_unit = extract_magnitude(ev)
         lat_raw, lon_raw = extract_lat_lon(ev)
         depth_raw = safe_get(ev, ["depth", "profundidad", "depth_km"])
-
-        # fecha/hora: distintas claves posibles
-        dt_raw = (
-            safe_get(ev, ["date"]) or
-            safe_get(ev, ["datetime"]) or
-            safe_get(ev, ["time"]) or
-            safe_get(ev, ["timestamp"]) or
-            safe_get(ev, ["fecha"]) or
-            safe_get(ev, ["hora"]) or
-            safe_get(ev, ["created_at"])
-        )
-
-        geo_ref = safe_get(ev, ["geo_reference", "georeference", "reference", "ref", "ubicacion", "location", "place"])
+        fecha = extract_datetime(ev)
+        geo_ref = extract_georef(ev)
 
         try:
             mag_f = _to_float(mag_raw)
@@ -335,7 +337,6 @@ def fetch_latest_event(min_mag: float = MIN_EVENT_MAGNITUDE) -> dict:
             depth_f = _to_float(depth_raw) if depth_raw is not None and str(depth_raw).strip() != "" else 0.0
         except Exception as e:
             parse_fails += 1
-            # Logs útiles para Railway
             if parse_fails <= 5:
                 print("[PARSE FAIL] keys=", list(ev.keys()))
                 print("[PARSE FAIL] mag_raw=", mag_raw)
@@ -346,32 +347,17 @@ def fetch_latest_event(min_mag: float = MIN_EVENT_MAGNITUDE) -> dict:
         if mag_f < float(min_mag):
             continue
 
-        evento = {
+        return {
             "Latitud_sismo": lat_f,
             "Longitud_sismo": lon_f,
             "Profundidad": depth_f,
             "magnitud": mag_f,
             "mag_type": mag_unit or safe_get(ev, ["mag_type", "magnitude_type", "tipo"]) or "No disponible",
             "Fuente_informe": XOR_API_URL,
-            "Referencia_api": _clean_txt(geo_ref) or "No disponible",
-            "FechaHora": parse_datetime_flexible(dt_raw) or "No disponible",
+            "FechaHora": fecha,
+            "Referencia": geo_ref,        # ✅ solo georef del JSON
             "min_magnitud_usada": float(min_mag),
         }
-
-        # referencia “más cercana” usando tu CSV (comuna + región)
-        try:
-            locs = read_localidades(CSV_PATH)
-            ref_local = referencia_por_localidad_mas_cercana(evento, locs)
-        except Exception as e:
-            print("[WARN] No pude calcular referencia por localidad más cercana:", repr(e))
-            ref_local = None
-
-        if ref_local:
-            evento["Referencia"] = f"{evento['Referencia_api']} | {ref_local}"
-        else:
-            evento["Referencia"] = evento["Referencia_api"]
-
-        return evento
 
     raise RuntimeError(
         f"No se encontró un sismo con magnitud >= {min_mag} en la API XOR. "
@@ -612,9 +598,6 @@ def build_map_html(evento: dict, preds: list[dict], n: int) -> str:
 # -------------------------
 @app.get("/", response_class=HTMLResponse)
 def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
-    """
-    HOME = resumen del sismo + tabla + mapa en la MISMA página
-    """
     try:
         evento = fetch_latest_event(MIN_EVENT_MAGNITUDE)
         preds, order = predict_intensidades(evento, MIN_INTENSITY_TO_SHOW)
@@ -760,10 +743,9 @@ def debug_xor(limit: int = Query(3, ge=1, le=20)):
     r.raise_for_status()
     data = r.json()
 
-    # devolver "limit" elementos si es lista o si tiene data/events
     if isinstance(data, list):
-        sample = data[:limit]
-        return JSONResponse({"type": "list", "sample": sample})
+        return JSONResponse({"type": "list", "sample": data[:limit]})
+
     if isinstance(data, dict):
         events = (
             safe_get(data, ["data"]) or
@@ -782,7 +764,3 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8000"))
     uvicorn.run("app:app", host="0.0.0.0", port=port)
-
-
-
-
