@@ -11,6 +11,7 @@ import folium
 
 from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 # ============================================================
 # CONFIGURACIÓN (MODIFICABLE)
@@ -40,6 +41,11 @@ MODEL_URL = os.getenv(
 )
 
 app = FastAPI(title="SismoTrack — Último sismo + distancias + intensidades (RF)")
+
+# ✅ Servir /static (para logo.png)
+if os.path.isdir("static"):
+    app.mount("/static", StaticFiles(directory="static"), name="static")
+
 
 # -------------------------
 # Utilidades
@@ -94,7 +100,7 @@ def safe_get(d: dict, keys: list[str], default=None):
 def parse_datetime_flexible(value):
     """
     Intenta parsear fecha/hora desde varios formatos comunes.
-    Devuelve string 'YYYY-MM-DD HH:MM:SS' o el original si no pudo.
+    Devuelve string 'DD-MM-YYYY HH:MM:SS' o el original si no pudo.
     """
     if value is None:
         return None
@@ -107,7 +113,7 @@ def parse_datetime_flexible(value):
             ts = int(s)
             if len(s) == 13:
                 ts = ts / 1000
-            return datetime.utcfromtimestamp(ts).strftime("%d-%m-%Y %H:%M:%S UTC")
+            return datetime.utcfromtimestamp(ts).strftime("%d-%m-%Y %H:%M:%S")
         except Exception:
             pass
 
@@ -125,23 +131,19 @@ def parse_datetime_flexible(value):
     for fmt in candidates:
         try:
             dt = datetime.strptime(s, fmt)
+            if dt.tzinfo is not None:
+                dt = dt.replace(tzinfo=None)
             return dt.strftime("%d-%m-%Y %H:%M:%S")
         except Exception:
             continue
 
     return s
 
+
 # -------------------------
 # Helpers de parseo XOR (robusto)
 # -------------------------
 def extract_lat_lon(ev: dict):
-    """
-    Intenta extraer lat/lon desde múltiples estructuras:
-    - ev["lat"], ev["lon"/"lng"]
-    - ev["coords"]={"lat":..,"lon":..} o {"latitude":..,"longitude":..}
-    - ev["coordinate"] / ev["coordinates"]
-    - GeoJSON: ev["geometry"]["coordinates"] = [lon, lat]
-    """
     lat = safe_get(ev, ["lat", "latitude", "latitud", "y"])
     lon = safe_get(ev, ["lon", "lng", "long", "longitude", "longitud", "x"])
 
@@ -159,10 +161,9 @@ def extract_lat_lon(ev: dict):
             a, b = obj[0], obj[1]
             try:
                 a_f = _to_float(a); b_f = _to_float(b)
-                # si |a|>90 probablemente es lon primero
                 if abs(a_f) > 90 and abs(b_f) <= 90:
-                    return b, a  # [lon, lat]
-                return a, b    # [lat, lon]
+                    return b, a
+                return a, b
             except Exception:
                 pass
 
@@ -170,16 +171,11 @@ def extract_lat_lon(ev: dict):
     if isinstance(geom, dict):
         coords = safe_get(geom, ["coordinates"])
         if isinstance(coords, (list, tuple)) and len(coords) >= 2:
-            return coords[1], coords[0]  # GeoJSON => [lon, lat]
+            return coords[1], coords[0]
 
     return None, None
 
 def extract_magnitude(ev: dict):
-    """
-    Soporta magnitud como:
-    - número/string
-    - dict {"value":4.1,"measure_unit":"Ml"} (estilo CSN)
-    """
     mag = safe_get(ev, ["magnitude", "magnitud", "mag", "m"])
     mag_unit = None
 
@@ -190,12 +186,6 @@ def extract_magnitude(ev: dict):
     return mag, mag_unit
 
 def extract_datetime(ev: dict):
-    """
-    Busca fecha/hora en múltiples claves comunes, incluyendo estilo CSN:
-    - local_date / utc_date
-    - date/datetime/time/timestamp/created_at/updated_at
-    También soporta que venga anidado como dict.
-    """
     dt_raw = (
         safe_get(ev, ["local_date", "fecha_local", "hora_local", "localdatetime"]) or
         safe_get(ev, ["utc_date", "fecha_utc", "hora_utc", "utcdatetime"]) or
@@ -212,12 +202,6 @@ def extract_datetime(ev: dict):
     return parse_datetime_flexible(dt_raw) or "No disponible"
 
 def extract_georef(ev: dict):
-    """
-    Extrae referencia geográfica/ubicación del evento desde varias claves:
-    - geo_reference (CSN)
-    - reference/ref/place/location/ubicacion
-    - también soporta dict anidado
-    """
     g = (
         safe_get(ev, ["geo_reference", "georeference", "reference", "ref", "place", "location", "ubicacion", "zona"]) or
         safe_get(ev, ["georef", "geo_ref"])
@@ -355,7 +339,7 @@ def fetch_latest_event(min_mag: float = MIN_EVENT_MAGNITUDE) -> dict:
             "mag_type": mag_unit or safe_get(ev, ["mag_type", "magnitude_type", "tipo"]) or "No disponible",
             "Fuente_informe": XOR_API_URL,
             "FechaHora": fecha,
-            "Referencia": geo_ref,        # ✅ solo georef del JSON
+            "Referencia": geo_ref,
             "min_magnitud_usada": float(min_mag),
         }
 
@@ -598,20 +582,19 @@ def build_map_html(evento: dict, preds: list[dict], n: int) -> str:
 # -------------------------
 @app.get("/", response_class=HTMLResponse)
 def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
+    """
+    HOME:
+      - si hay sismo >= MIN_EVENT_MAGNITUDE: muestra resultados
+      - si NO hay: muestra mensaje amigable (sin error y sin link /health)
+    """
     try:
         evento = fetch_latest_event(MIN_EVENT_MAGNITUDE)
-        preds, order = predict_intensidades(evento, MIN_INTENSITY_TO_SHOW)
-
-        table_html = render_table(preds, n)
-
-        map_html = build_map_html(evento, preds, n)
-        srcdoc = (
-            map_html.replace("&", "&amp;")
-                    .replace('"', "&quot;")
-                    .replace("<", "&lt;")
-                    .replace(">", "&gt;")
+    except Exception:
+        # ✅ Caso: no hay sismos (o no hay ninguno que cumpla el umbral)
+        msg = (
+            f"No se han encontrado sismos de magnitudes mayores o iguales a "
+            f"{MIN_EVENT_MAGNITUDE:.1f} en las ultimas 48 horas."
         )
-
         html = f"""
         <html>
           <head>
@@ -619,63 +602,88 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
             <title>SismoTrack</title>
           </head>
           <body style="font-family: Arial, sans-serif; padding: 24px;">
-            <h1 style="margin-bottom: 6px;">SismoTrack</h1>
-            <div style="margin-bottom: 18px; color:#333;">
-              Sistema de estimación temprana de intensidades sísmicas (Chile)
+            <div style="display:flex; align-items:center; gap:16px; margin-bottom:18px;">
+              <img src="/static/logo.png" alt="logo" style="height:90px; width:auto;">
+              <div>
+                <h1 style="margin:0;">SismoTrack</h1>
+                <div style="color:#555;">Sistema de estimación temprana de intensidades sísmicas (Chile)</div>
+              </div>
             </div>
 
-            <h2>Último sismo de magnitud igual o mayor a {MIN_EVENT_MAGNITUDE} en las últimas 48 hrs.</h2>
-            <ul>
-              <li><b>Fecha/Hora:</b> {evento.get("FechaHora","No disponible")}</li>
-              <li><b>Latitud_sismo:</b> {evento["Latitud_sismo"]}</li>
-              <li><b>Longitud_sismo:</b> {evento["Longitud_sismo"]}</li>
-              <li><b>Profundidad (km):</b> {evento["Profundidad"]}</li>
-              <li><b>Magnitud:</b> {evento["magnitud"]} ({evento.get("mag_type","")})</li>
-              <li><b>Referencia:</b> {evento.get("Referencia") or "No disponible"}</li>
-            </ul>
-
-            <div style="margin: 10px 0 18px 0;">
-              <b>Fuente:</b> <a href="https://www.sismologia.cl/" target="_blank">https://www.sismologia.cl/</a>
+            <div style="padding:18px; border:1px solid #ddd; background:#fafafa; border-radius:12px;">
+              <div style="font-size:18px;"><b>{msg}</b></div>
             </div>
-
-            <h2>Intensidades Mercalli estimadas mayores a {MIN_INTENSITY_TO_SHOW}</h2>
-            {table_html}
-
-            <h2 style="margin-top: 24px;">Mapa (Epicentro + localidades)</h2>
-            <div style="margin: 6px 0 12px 0; color:#333;">
-              El tamaño del círculo es proporcional a la intensidad y el color depende del rango.
-            </div>
-
-            <iframe
-              srcdoc="{srcdoc}"
-              style="width:100%; height:650px; border:0; border-radius:10px;"
-              loading="lazy"
-            ></iframe>
-
-            <div style="margin-top:16px;">
-              <a href="/intensidades/json">Ver JSON</a> |
-              <a href="/health">Health</a> |
-              <a href="/debug/xor">Debug XOR</a>
-            </div>
-
           </body>
         </html>
         """
-        return HTMLResponse(content=html)
+        return HTMLResponse(content=html, status_code=200)
 
-    except Exception as e:
-        err = str(e)
-        html = f"""
-        <html>
-          <head><meta charset="utf-8"><title>Error</title></head>
-          <body style="font-family: Arial, sans-serif; padding: 24px;">
-            <h2>Ocurrió un error al construir la página</h2>
-            <p style="color:#b00020;"><b>Error:</b> {err}</p>
-            <p>Revisa <a href="/health">/health</a>.</p>
-          </body>
-        </html>
-        """
-        return HTMLResponse(content=html, status_code=500)
+    # ✅ Caso normal: sí hay evento
+    preds, order = predict_intensidades(evento, MIN_INTENSITY_TO_SHOW)
+
+    table_html = render_table(preds, n)
+    map_html = build_map_html(evento, preds, n)
+
+    srcdoc = (
+        map_html.replace("&", "&amp;")
+                .replace('"', "&quot;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+    )
+
+    html = f"""
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <title>SismoTrack</title>
+      </head>
+      <body style="font-family: Arial, sans-serif; padding: 24px;">
+
+        <div style="display:flex; align-items:center; gap:16px; margin-bottom:18px;">
+          <img src="/static/logo.png" alt="logo" style="height:90px; width:auto;">
+          <div>
+            <h1 style="margin:0;">SismoTrack</h1>
+            <div style="color:#555;">Sistema de estimación temprana de intensidades sísmicas (Chile)</div>
+          </div>
+        </div>
+
+        <h2>Último sismo de magnitud igual o mayor a {MIN_EVENT_MAGNITUDE} en las últimas 48 hrs.</h2>
+        <ul>
+          <li><b>Fecha/Hora:</b> {evento.get("FechaHora","No disponible")}</li>
+          <li><b>Latitud_sismo:</b> {evento["Latitud_sismo"]}</li>
+          <li><b>Longitud_sismo:</b> {evento["Longitud_sismo"]}</li>
+          <li><b>Profundidad (km):</b> {evento["Profundidad"]}</li>
+          <li><b>Magnitud:</b> {evento["magnitud"]} ({evento.get("mag_type","")})</li>
+          <li><b>Referencia:</b> {evento.get("Referencia") or "No disponible"}</li>
+        </ul>
+
+        <div style="margin: 10px 0 18px 0;">
+          <b>Fuente:</b> <a href="https://www.sismologia.cl/" target="_blank">https://www.sismologia.cl/</a>
+        </div>
+
+        <h2>Intensidades Mercalli estimadas mayores a {MIN_INTENSITY_TO_SHOW}</h2>
+        {table_html}
+
+        <h2 style="margin-top: 24px;">Mapa (Epicentro + localidades)</h2>
+        <div style="margin: 6px 0 12px 0; color:#333;">
+          El tamaño del círculo es proporcional a la intensidad y el color depende del rango.
+        </div>
+
+        <iframe
+          srcdoc="{srcdoc}"
+          style="width:100%; height:650px; border:0; border-radius:10px;"
+          loading="lazy"
+        ></iframe>
+
+        <div style="margin-top:16px;">
+          <a href="/intensidades/json">Ver JSON</a> |
+          <a href="/debug/xor">Debug XOR</a>
+        </div>
+
+      </body>
+    </html>
+    """
+    return HTMLResponse(content=html, status_code=200)
 
 
 @app.get("/intensidades/json")
