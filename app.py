@@ -661,7 +661,7 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
           <b>Fuente:</b> <a href="https://www.sismologia.cl/" target="_blank">https://www.sismologia.cl/</a>
         </div>
 
-        <h2>Intensidades Mercalli estimadas mayores a {MIN_INTENSITY_TO_SHOW}</h2>
+        <h2>Intensidades Mercalli estimadas iguales o mayores a {MIN_INTENSITY_TO_SHOW}</h2>
         {table_html}
 
         <h2 style="margin-top: 24px;">Mapa (Epicentro + localidades)</h2>
