@@ -155,7 +155,7 @@ def render_header_html() -> str:
           Y<span style="color:#f57c00;">A</span>T<span style="color:#f57c00;">I</span>
         </h1>
         <h2 style="margin:6px 0 0 0; font-size:28px; font-weight:600; color:#000;">
-          Sistema de predicción sísmica (Chile)
+          Sistema de predicción de intensidad sísmica (Chile)
         </h2>
       </div>
     </div>
