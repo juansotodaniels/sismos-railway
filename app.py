@@ -604,7 +604,7 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
           <body style="font-family: Arial, sans-serif; padding: 24px;">
             <div style="display:flex; align-items:center; gap:16px; margin-bottom:18px;">
               
-              <img src="/static/logo.png?v=20260202" alt="logo" style="height:35px; width:auto; max-width:100%;">
+              <img src="/static/logo.png?v=20260202" alt="logo" style="height:35px; width:auto; max-width:50%;">
 
               <div>
                 <h1>Y<span style="color:#f57c00;">A</span>T<span style="color:#f57c00;">I</span></h1>
