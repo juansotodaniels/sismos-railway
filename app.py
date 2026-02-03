@@ -608,7 +608,7 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
               <h2>Sistema de predicción sísmica (Chile)</h2>
               <div>
                 <h1>Y<span style="color:#f57c00;">A</span>T<span style="color:#f57c00;">I</span></h1>
-
+                <h2 style="color: black;">Sistema de predicción sísmica (Chile)</h2></div>
                 <div style="color: black;"><h2>Sistema de predicción sísmica (Chile)</h2></div>
               </div>
             </div>
