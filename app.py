@@ -608,7 +608,6 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
               <h2>Sistema de predicción sísmica (Chile)</h2>
               <div>
                 <h1>Y<span style="color:#f57c00;">A</span>T<span style="color:#f57c00;">I</span></h1>
-                <h2 style="color: black;">Sistema de predicción sísmica (Chile)</h2></div>
                 <div style="color: black;"><h2>Sistema de predicción sísmica (Chile)</h2></div>
               </div>
             </div>
@@ -678,11 +677,6 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
           style="width:100%; height:650px; border:0; border-radius:10px;"
           loading="lazy"
         ></iframe>
-
-        <div style="margin-top:16px;">
-          <a href="/intensidades/json">Ver JSON</a> |
-          <a href="/debug/xor">Debug XOR</a>
-        </div>
 
       </body>
     </html>
