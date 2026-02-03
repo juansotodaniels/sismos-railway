@@ -606,7 +606,7 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
               <img src="/static/logo.png?v=1" style="height:140px;">
                 <div>
                     <h1 style="margin:0;">Y<span style="color:#f57c00;">A</span>T<span style="color:#f57c00;">I</span></h1>
-                    <h2 style="margin:6px 0 0 0; font-size:26px; color:#000;">Sistema de predicción sísmica (Chile)</h2>
+                    <h2 style="margin:6px 0 0 0; font-size:26px; color:#000;">Sistema hhhhhh de predicción sísmica (Chile)</h2>
                 </div>
             </div>
 
