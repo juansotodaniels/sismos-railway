@@ -602,15 +602,14 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
             <title>YATI</title>
           </head>
           <body style="font-family: Arial, sans-serif; padding: 24px;">
-            <div style="display:flex; align-items:center; gap:16px; margin-bottom:18px;">
-              
-              <img src="/static/logo.png?v=20260202" alt="logo" style="height:35px; width:auto; max-width:50%;">
-              <h2>Sistema de predicción sísmica (Chile)</h2>
-              <div>
-                <h1>Y<span style="color:#f57c00;">A</span>T<span style="color:#f57c00;">I</span></h1>
-                <div style="color: black;"><h2>Sistema de predicción sísmica (Chile)</h2></div>
-              </div>
+            <div style="display:flex; align-items:center; gap:20px;">
+              <img src="/static/logo.png?v=1" style="height:140px;">
+                <div>
+                    <h1 style="margin:0;">Y<span style="color:#f57c00;">A</span>T<span style="color:#f57c00;">I</span></h1>
+                    <h2 style="margin:6px 0 0 0; font-size:26px; color:#111;">Sistema de predicción sísmica (Chile)</h2>
+                </div>
             </div>
+
 
             <div style="padding:18px; border:1px solid #ddd; background:#fafafa; border-radius:12px;">
               <div style="font-size:18px;"><b>{msg}</b></div>
