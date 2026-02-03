@@ -2,7 +2,7 @@ import os
 import csv
 import math
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import requests
 import numpy as np
@@ -40,7 +40,10 @@ MODEL_URL = os.getenv(
     "https://github.com/juansotodaniels/sismos-railway/releases/download/v1.0/Sismos_RF_joblib_Ene_2026.pkl"
 )
 
-app = FastAPI(title="SismoTrack — Último sismo + distancias + intensidades (RF)")
+# ✅ Para bustear caché del logo: cambia el valor cuando reemplaces /static/logo.png
+LOGO_VERSION = "20260203"
+
+app = FastAPI(title="YATI — Predicción de Intensidad Sísmica (RF)")
 
 # ✅ Servir /static (para logo.png)
 if os.path.isdir("static"):
@@ -138,6 +141,25 @@ def parse_datetime_flexible(value):
             continue
 
     return s
+
+
+# -------------------------
+# Header HTML (logo + título + subtítulo)
+# -------------------------
+def render_header_html() -> str:
+    return f"""
+    <div style="display:flex; align-items:center; gap:18px; margin-bottom:18px;">
+      <img src="/static/logo.png?v={LOGO_VERSION}" alt="logo" style="height:180px; width:auto;">
+      <div>
+        <h1 style="margin:0; font-size:56px; line-height:1;">
+          Y<span style="color:#f57c00;">A</span>T<span style="color:#f57c00;">I</span>
+        </h1>
+        <h2 style="margin:6px 0 0 0; font-size:28px; font-weight:600; color:#000;">
+          Sistema de predicción sísmica (Chile)
+        </h2>
+      </div>
+    </div>
+    """
 
 
 # -------------------------
@@ -277,7 +299,7 @@ def read_localidades(csv_path: str) -> list[dict]:
 
 
 # -------------------------
-# API XOR: último sismo >= magnitud mínima
+# API XOR: último sismo >= magnitud mínima, dentro de las últimas 48 horas
 #   ✅ Usa SOLO la referencia geográfica del JSON
 #   ❌ NO calcula localidad más cercana
 # -------------------------
@@ -302,6 +324,10 @@ def fetch_latest_event(min_mag: float = MIN_EVENT_MAGNITUDE) -> dict:
     if not isinstance(events, list) or not events:
         raise RuntimeError("La API XOR no devolvió una lista de sismos válida.")
 
+    # Umbral temporal: últimas 48 horas (en UTC) — best effort
+    now_utc = datetime.utcnow()
+    cutoff = now_utc - timedelta(hours=48)
+
     parse_fails = 0
 
     for ev in events:
@@ -311,24 +337,31 @@ def fetch_latest_event(min_mag: float = MIN_EVENT_MAGNITUDE) -> dict:
         mag_raw, mag_unit = extract_magnitude(ev)
         lat_raw, lon_raw = extract_lat_lon(ev)
         depth_raw = safe_get(ev, ["depth", "profundidad", "depth_km"])
-        fecha = extract_datetime(ev)
+        fecha_str = extract_datetime(ev)  # "DD-MM-YYYY HH:MM:SS" o "No disponible"
         geo_ref = extract_georef(ev)
+
+        # intentar convertir fecha para filtrar 48h (si no se puede, no filtramos por tiempo)
+        dt_obj = None
+        try:
+            if fecha_str and fecha_str != "No disponible":
+                dt_obj = datetime.strptime(fecha_str, "%d-%m-%Y %H:%M:%S")
+        except Exception:
+            dt_obj = None
 
         try:
             mag_f = _to_float(mag_raw)
             lat_f = _to_float(lat_raw)
             lon_f = _to_float(lon_raw)
             depth_f = _to_float(depth_raw) if depth_raw is not None and str(depth_raw).strip() != "" else 0.0
-        except Exception as e:
+        except Exception:
             parse_fails += 1
-            if parse_fails <= 5:
-                print("[PARSE FAIL] keys=", list(ev.keys()))
-                print("[PARSE FAIL] mag_raw=", mag_raw)
-                print("[PARSE FAIL] lat_raw=", lat_raw, "lon_raw=", lon_raw, "depth_raw=", depth_raw)
-                print("[PARSE FAIL] err=", repr(e))
             continue
 
         if mag_f < float(min_mag):
+            continue
+
+        # Si pudimos parsear fecha, exigimos que esté dentro de 48h.
+        if dt_obj is not None and dt_obj < cutoff:
             continue
 
         return {
@@ -338,14 +371,13 @@ def fetch_latest_event(min_mag: float = MIN_EVENT_MAGNITUDE) -> dict:
             "magnitud": mag_f,
             "mag_type": mag_unit or safe_get(ev, ["mag_type", "magnitude_type", "tipo"]) or "No disponible",
             "Fuente_informe": XOR_API_URL,
-            "FechaHora": fecha,
+            "FechaHora": fecha_str,
             "Referencia": geo_ref,
             "min_magnitud_usada": float(min_mag),
         }
 
     raise RuntimeError(
-        f"No se encontró un sismo con magnitud >= {min_mag} en la API XOR. "
-        f"(se descartaron {parse_fails} eventos por parseo)."
+        f"No se encontró un sismo con magnitud >= {min_mag} en las últimas 48 horas."
     )
 
 
@@ -463,6 +495,13 @@ def startup():
 # -------------------------
 def render_table(preds: list[dict], n: int) -> str:
     show = preds[:n]
+    if not show:
+        return """
+        <div style="padding:14px; border:1px solid #eee; background:#fafafa; border-radius:10px;">
+          No hay localidades con intensidad estimada que cumpla el umbral.
+        </div>
+        """
+
     rows = "\n".join(
         f"<tr>"
         f"<td style='text-align:center;'>{i+1}</td>"
@@ -584,13 +623,12 @@ def build_map_html(evento: dict, preds: list[dict], n: int) -> str:
 def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
     """
     HOME:
-      - si hay sismo >= MIN_EVENT_MAGNITUDE: muestra resultados
+      - si hay sismo >= MIN_EVENT_MAGNITUDE (y dentro de 48h): muestra resultados
       - si NO hay: muestra mensaje amigable (sin error y sin link /health)
     """
     try:
         evento = fetch_latest_event(MIN_EVENT_MAGNITUDE)
     except Exception:
-        # ✅ Caso: no hay sismos (o no hay ninguno que cumpla el umbral)
         msg = (
             f"No se han encontrado sismos de magnitudes mayores o iguales a "
             f"{MIN_EVENT_MAGNITUDE:.1f} en las ultimas 48 horas."
@@ -602,15 +640,7 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
             <title>YATI</title>
           </head>
           <body style="font-family: Arial, sans-serif; padding: 24px;">
-            <div style="display:flex; align-items:center; gap:20px;">
-              <img src="/static/logo.png?v=1" style="height:140px;">
-                <div>
-                    <h1 style="margin:0;">Y<span style="color:#f57c00;">A</span>T<span style="color:#f57c00;">I</span></h1>
-                    <h2 style="margin:6px 0 0 0; font-size:26px; color:#000;">Sistema hhhhhh de predicción sísmica (Chile)</h2>
-                </div>
-            </div>
-
-
+            {render_header_html()}
             <div style="padding:18px; border:1px solid #ddd; background:#fafafa; border-radius:12px;">
               <div style="font-size:18px;"><b>{msg}</b></div>
             </div>
@@ -619,12 +649,10 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
         """
         return HTMLResponse(content=html, status_code=200)
 
-    # ✅ Caso normal: sí hay evento
     preds, order = predict_intensidades(evento, MIN_INTENSITY_TO_SHOW)
-
     table_html = render_table(preds, n)
-    map_html = build_map_html(evento, preds, n)
 
+    map_html = build_map_html(evento, preds, n)
     srcdoc = (
         map_html.replace("&", "&amp;")
                 .replace('"', "&quot;")
@@ -639,15 +667,7 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
         <title>YATI</title>
       </head>
       <body style="font-family: Arial, sans-serif; padding: 24px;">
-
-        <div style="display:flex; align-items:center; gap:16px; margin-bottom:18px;">
-          <img src="/static/logo.png" alt="logo" style="height:180px; width:auto;">
-          <div>
-            <h1>Y<span style="color:#f57c00;">A</span>T<span style="color:#f57c00;">I</span></h1>
-
-            <div style="color:#555;">Sistema de predicción de intesidad sísmica (Chile)</div>
-          </div>
-        </div>
+        {render_header_html()}
 
         <h2>Último sismo de magnitud igual o mayor a {MIN_EVENT_MAGNITUDE} en 48 hrs.</h2>
         <ul>
@@ -741,9 +761,6 @@ def health():
 
 @app.get("/debug/xor")
 def debug_xor(limit: int = Query(3, ge=1, le=20)):
-    """
-    Devuelve una muestra del JSON crudo de XOR para debug.
-    """
     r = requests.get(XOR_API_URL, headers=HEADERS, timeout=HTTP_TIMEOUT)
     r.raise_for_status()
     data = r.json()
