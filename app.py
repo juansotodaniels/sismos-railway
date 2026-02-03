@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 # ============================================================
 # CONFIGURACIÓN (MODIFICABLE)
 # ============================================================
-MIN_EVENT_MAGNITUDE = float(os.getenv("MIN_EVENT_MAGNITUDE", "9"))          # evento: M >=
+MIN_EVENT_MAGNITUDE = float(os.getenv("MIN_EVENT_MAGNITUDE", "4"))          # evento: M >=
 MIN_INTENSITY_TO_SHOW = int(os.getenv("MIN_INTENSITY_TO_SHOW", "3"))        # mostrar: I >=
 DEFAULT_TABLE_ROWS = int(os.getenv("DEFAULT_TABLE_ROWS", "200"))            # filas mostradas en Home
 
