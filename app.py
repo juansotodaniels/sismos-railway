@@ -144,6 +144,18 @@ def parse_datetime_flexible(value):
 
 
 # -------------------------
+# Distancia crítica (NUEVO)
+# -------------------------
+def distancia_critica_km(magnitud: float) -> float:
+    """
+    dc = 11.5220 * M^2 - 8.1164 * M + 37.5910
+    """
+    M = float(magnitud)
+    dc = 11.5220 * (M ** 2) - 8.1164 * M + 37.5910
+    return max(0.0, float(dc))
+
+
+# -------------------------
 # Header HTML (logo + título + subtítulo)
 # -------------------------
 def render_header_html() -> str:
@@ -302,6 +314,7 @@ def read_localidades(csv_path: str) -> list[dict]:
 # API XOR: último sismo >= magnitud mínima, dentro de las últimas 48 horas
 #   ✅ Usa SOLO la referencia geográfica del JSON
 #   ❌ NO calcula localidad más cercana
+#   ✅ Calcula distancia crítica (NUEVO) y la incluye en el evento
 # -------------------------
 def fetch_latest_event(min_mag: float = MIN_EVENT_MAGNITUDE) -> dict:
     resp = requests.get(XOR_API_URL, headers=HEADERS, timeout=HTTP_TIMEOUT)
@@ -324,11 +337,8 @@ def fetch_latest_event(min_mag: float = MIN_EVENT_MAGNITUDE) -> dict:
     if not isinstance(events, list) or not events:
         raise RuntimeError("La API XOR no devolvió una lista de sismos válida.")
 
-    # Umbral temporal: últimas 48 horas (en UTC) — best effort
     now_utc = datetime.utcnow()
     cutoff = now_utc - timedelta(hours=48)
-
-    parse_fails = 0
 
     for ev in events:
         if not isinstance(ev, dict):
@@ -337,10 +347,9 @@ def fetch_latest_event(min_mag: float = MIN_EVENT_MAGNITUDE) -> dict:
         mag_raw, mag_unit = extract_magnitude(ev)
         lat_raw, lon_raw = extract_lat_lon(ev)
         depth_raw = safe_get(ev, ["depth", "profundidad", "depth_km"])
-        fecha_str = extract_datetime(ev)  # "DD-MM-YYYY HH:MM:SS" o "No disponible"
+        fecha_str = extract_datetime(ev)
         geo_ref = extract_georef(ev)
 
-        # intentar convertir fecha para filtrar 48h (si no se puede, no filtramos por tiempo)
         dt_obj = None
         try:
             if fecha_str and fecha_str != "No disponible":
@@ -354,15 +363,16 @@ def fetch_latest_event(min_mag: float = MIN_EVENT_MAGNITUDE) -> dict:
             lon_f = _to_float(lon_raw)
             depth_f = _to_float(depth_raw) if depth_raw is not None and str(depth_raw).strip() != "" else 0.0
         except Exception:
-            parse_fails += 1
             continue
 
         if mag_f < float(min_mag):
             continue
 
-        # Si pudimos parsear fecha, exigimos que esté dentro de 48h.
         if dt_obj is not None and dt_obj < cutoff:
             continue
+
+        # ✅ Distancia crítica (NUEVO)
+        dc_km = distancia_critica_km(mag_f)
 
         return {
             "Latitud_sismo": lat_f,
@@ -374,6 +384,7 @@ def fetch_latest_event(min_mag: float = MIN_EVENT_MAGNITUDE) -> dict:
             "FechaHora": fecha_str,
             "Referencia": geo_ref,
             "min_magnitud_usada": float(min_mag),
+            "distancia_critica_km": dc_km,   # ✅ agregado
         }
 
     raise RuntimeError(
@@ -450,6 +461,7 @@ def build_feature_matrix(evento: dict, locs: list[dict]):
                 "Latitud_localidad": loc["Latitud_localidad"],
                 "Longitud_localidad": loc["Longitud_localidad"],
                 "distancia_epicentro_km": int(round(dist)),
+                "distancia_epicentro_km_float": float(dist),  # ✅ para comparar con dc con más precisión
             }
         )
 
@@ -465,12 +477,37 @@ def predict_intensidades(evento: dict, min_intensity: int = MIN_INTENSITY_TO_SHO
     model = load_model()
     y_pred = model.predict(X)
 
+    # ✅ Distancia crítica (NUEVO) — si no viene, usamos infinito (no corta nada)
+    dc = float(evento.get("distancia_critica_km", float("inf")))
+
     out = []
     for i, m in enumerate(meta):
+        # distancia real (float) para comparar con dc
+        dist_km = float(m.get("distancia_epicentro_km_float", m["distancia_epicentro_km"]))
+
         intensidad = round_intensity(y_pred[i])
+
+        # ✅ Corrección por distancia crítica:
+        # si la localidad está más lejos que dc => intensidad = 0
+        if dist_km > dc:
+            intensidad = 0
+
+        # mantenemos la misma lógica de filtrado para mostrar
         if intensidad < int(min_intensity):
             continue
-        out.append({**m, "intensidad_predicha": intensidad})
+
+        out.append(
+            {
+                # dejamos el output igual que antes
+                "localidad": m["localidad"],
+                "comuna": m.get("comuna", ""),
+                "region": m.get("region", ""),
+                "Latitud_localidad": m["Latitud_localidad"],
+                "Longitud_localidad": m["Longitud_localidad"],
+                "distancia_epicentro_km": int(m["distancia_epicentro_km"]),
+                "intensidad_predicha": int(intensidad),
+            }
+        )
 
     out.sort(key=lambda x: (-x["intensidad_predicha"], x["distancia_epicentro_km"]))
     return out, order
@@ -562,6 +599,10 @@ def build_map_html(evento: dict, preds: list[dict], n: int) -> str:
         f"</div>"
     )
 
+    # ✅ mostramos distancia crítica (sin cambiar funcionalidades: solo más info)
+    dc = evento.get("distancia_critica_km", None)
+    dc_txt = f"{dc:.1f} km" if isinstance(dc, (int, float)) else "No disponible"
+
     folium.Marker(
         location=[lat_s, lon_s],
         tooltip=folium.Tooltip(tooltip_html, sticky=True),
@@ -570,6 +611,7 @@ def build_map_html(evento: dict, preds: list[dict], n: int) -> str:
             f"Fecha/Hora: {evento.get('FechaHora','No disponible')}<br>"
             f"Lat: {lat_s}<br>Lon: {lon_s}<br>"
             f"Prof: {evento['Profundidad']} km<br>M: {evento['magnitud']}<br>"
+            f"dc: {dc_txt}<br>"
             f"Ref: {ref}",
             max_width=320
         ),
@@ -660,6 +702,9 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
                 .replace(">", "&gt;")
     )
 
+    dc = float(evento.get("distancia_critica_km", float("nan")))
+    dc_txt = f"{dc:.1f} km" if not np.isnan(dc) else "No disponible"
+
     html = f"""
     <html>
       <head>
@@ -677,6 +722,7 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
           <li><b>Profundidad (km):</b> {evento["Profundidad"]}</li>
           <li><b>Magnitud:</b> {evento["magnitud"]} ({evento.get("mag_type","")})</li>
           <li><b>Referencia:</b> {evento.get("Referencia") or "No disponible"}</li>
+          <li><b>Distancia crítica (dc):</b> {dc_txt}</li>
         </ul>
 
         <div style="margin: 10px 0 18px 0;">
@@ -719,6 +765,7 @@ def intensidades_json():
             "modelo_url": MODEL_URL,
             "features_orden": order,
             "cantidad_localidades_int_ge_min": len(preds),
+            "distancia_critica_km": evento.get("distancia_critica_km"),
             "resultados": preds,
         }
     )
@@ -786,3 +833,4 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8000"))
     uvicorn.run("app:app", host="0.0.0.0", port=port)
+
