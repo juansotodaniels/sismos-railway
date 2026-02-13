@@ -148,10 +148,10 @@ def parse_datetime_flexible(value):
 # -------------------------
 def distancia_critica_km(magnitud: float) -> float:
     """
-    dc = 11.5220 * M^2 - 8.1164 * M + 37.5910
+    dc = 11.5220 * M^2 - 8.1164 * M + 137.5910
     """
     M = float(magnitud)
-    dc = 11.5220 * (M ** 2) - 8.1164 * M + 37.5910
+    dc = 11.5220 * (M ** 2) - 8.1164 * M + 137.5910
     return max(0.0, float(dc))
 
 
