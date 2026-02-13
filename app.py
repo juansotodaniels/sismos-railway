@@ -3,6 +3,7 @@ import csv
 import math
 import threading
 from datetime import datetime, timedelta
+from typing import Optional
 
 import requests
 import numpy as np
@@ -12,6 +13,7 @@ import folium
 from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
 
 # ============================================================
 # CONFIGURACIÓN (MODIFICABLE)
@@ -24,6 +26,9 @@ PRELOAD_MODEL_ON_STARTUP = os.getenv("PRELOAD_MODEL_ON_STARTUP", "1") == "1"
 
 HTTP_TIMEOUT = int(os.getenv("HTTP_TIMEOUT", "25"))
 MODEL_DOWNLOAD_TIMEOUT = int(os.getenv("MODEL_DOWNLOAD_TIMEOUT", "600"))
+
+# Para /alerta/v1: máximo de localidades enviadas por defecto (0 = todas)
+ALERTA_TOP_DEFAULT = int(os.getenv("ALERTA_TOP_DEFAULT", "200"))
 # ============================================================
 
 # ✅ API XOR
@@ -44,6 +49,15 @@ MODEL_URL = os.getenv(
 LOGO_VERSION = "20260203"
 
 app = FastAPI(title="YATI — Predicción de Intensidad Sísmica (RF)")
+
+# ✅ CORS (útil para Cloudflare Worker u otros consumidores)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],   # si quieres: restringimos luego a tu dominio/worker
+    allow_credentials=False,
+    allow_methods=["GET"],
+    allow_headers=["*"],
+)
 
 # ✅ Servir /static (para logo.png)
 if os.path.isdir("static"):
@@ -144,7 +158,9 @@ def parse_datetime_flexible(value):
 
 
 # -------------------------
-# Distancia crítica (NUEVO)
+# Distancia crítica (INTERNA)
+#   ✅ Se usa SOLO para filtrar intensidades por distancia
+#   ❌ NO se publica en HTML ni JSON
 # -------------------------
 def distancia_critica_km(magnitud: float) -> float:
     """
@@ -313,8 +329,9 @@ def read_localidades(csv_path: str) -> list[dict]:
 # -------------------------
 # API XOR: último sismo >= magnitud mínima, dentro de las últimas 48 horas
 #   ✅ Usa SOLO la referencia geográfica del JSON
-#   ❌ NO calcula localidad más cercana
-#   ✅ Calcula distancia crítica (NUEVO) y la incluye en el evento
+#   ✅ Incluye id del evento (si existe)
+#   ✅ Calcula distancia crítica (INTERNA) para filtrar intensidades
+#   ❌ NO publica distancia crítica
 # -------------------------
 def fetch_latest_event(min_mag: float = MIN_EVENT_MAGNITUDE) -> dict:
     resp = requests.get(XOR_API_URL, headers=HEADERS, timeout=HTTP_TIMEOUT)
@@ -344,6 +361,9 @@ def fetch_latest_event(min_mag: float = MIN_EVENT_MAGNITUDE) -> dict:
         if not isinstance(ev, dict):
             continue
 
+        # ✅ id del evento (si existe)
+        event_id = safe_get(ev, ["id", "event_id", "eqid", "publicid", "eventId", "eventID"])
+
         mag_raw, mag_unit = extract_magnitude(ev)
         lat_raw, lon_raw = extract_lat_lon(ev)
         depth_raw = safe_get(ev, ["depth", "profundidad", "depth_km"])
@@ -371,10 +391,16 @@ def fetch_latest_event(min_mag: float = MIN_EVENT_MAGNITUDE) -> dict:
         if dt_obj is not None and dt_obj < cutoff:
             continue
 
-        # ✅ Distancia crítica (NUEVO)
+        # ✅ distancia crítica INTERNA
         dc_km = distancia_critica_km(mag_f)
 
+        # ✅ uid de respaldo (por si id viene vacío)
+        event_uid = f"{fecha_str}|{lat_f}|{lon_f}|{mag_f}|{depth_f}"
+
         return {
+            "id": str(event_id) if event_id is not None else None,
+            "event_uid": event_uid,
+
             "Latitud_sismo": lat_f,
             "Longitud_sismo": lon_f,
             "Profundidad": depth_f,
@@ -384,7 +410,9 @@ def fetch_latest_event(min_mag: float = MIN_EVENT_MAGNITUDE) -> dict:
             "FechaHora": fecha_str,
             "Referencia": geo_ref,
             "min_magnitud_usada": float(min_mag),
-            "distancia_critica_km": dc_km,   # ✅ agregado
+
+            # 👇 interno (NO publicar)
+            "_dc_km": float(dc_km),
         }
 
     raise RuntimeError(
@@ -461,7 +489,7 @@ def build_feature_matrix(evento: dict, locs: list[dict]):
                 "Latitud_localidad": loc["Latitud_localidad"],
                 "Longitud_localidad": loc["Longitud_localidad"],
                 "distancia_epicentro_km": int(round(dist)),
-                "distancia_epicentro_km_float": float(dist),  # ✅ para comparar con dc con más precisión
+                "distancia_epicentro_km_float": float(dist),
             }
         )
 
@@ -477,28 +505,23 @@ def predict_intensidades(evento: dict, min_intensity: int = MIN_INTENSITY_TO_SHO
     model = load_model()
     y_pred = model.predict(X)
 
-    # ✅ Distancia crítica (NUEVO) — si no viene, usamos infinito (no corta nada)
-    dc = float(evento.get("distancia_critica_km", float("inf")))
+    # ✅ distancia crítica SOLO interna
+    dc = float(evento.get("_dc_km", float("inf")))
 
     out = []
     for i, m in enumerate(meta):
-        # distancia real (float) para comparar con dc
         dist_km = float(m.get("distancia_epicentro_km_float", m["distancia_epicentro_km"]))
-
         intensidad = round_intensity(y_pred[i])
 
-        # ✅ Corrección por distancia crítica:
-        # si la localidad está más lejos que dc => intensidad = 0
+        # ✅ corte interno por distancia crítica
         if dist_km > dc:
             intensidad = 0
 
-        # mantenemos la misma lógica de filtrado para mostrar
         if intensidad < int(min_intensity):
             continue
 
         out.append(
             {
-                # dejamos el output igual que antes
                 "localidad": m["localidad"],
                 "comuna": m.get("comuna", ""),
                 "region": m.get("region", ""),
@@ -599,10 +622,7 @@ def build_map_html(evento: dict, preds: list[dict], n: int) -> str:
         f"</div>"
     )
 
-    # ✅ mostramos distancia crítica (sin cambiar funcionalidades: solo más info)
-    dc = evento.get("distancia_critica_km", None)
-    dc_txt = f"{dc:.1f} km" if isinstance(dc, (int, float)) else "No disponible"
-
+    # ❌ NO mostramos distancia crítica en tooltip ni popup
     folium.Marker(
         location=[lat_s, lon_s],
         tooltip=folium.Tooltip(tooltip_html, sticky=True),
@@ -611,7 +631,6 @@ def build_map_html(evento: dict, preds: list[dict], n: int) -> str:
             f"Fecha/Hora: {evento.get('FechaHora','No disponible')}<br>"
             f"Lat: {lat_s}<br>Lon: {lon_s}<br>"
             f"Prof: {evento['Profundidad']} km<br>M: {evento['magnitud']}<br>"
-            f"dc: {dc_txt}<br>"
             f"Ref: {ref}",
             max_width=320
         ),
@@ -659,6 +678,25 @@ def build_map_html(evento: dict, preds: list[dict], n: int) -> str:
 
 
 # -------------------------
+# Helpers de "salida pública" (NO incluye _dc_km)
+# -------------------------
+def evento_publico(evento: dict) -> dict:
+    return {
+        "id": evento.get("id"),
+        "event_uid": evento.get("event_uid"),
+        "Latitud_sismo": evento.get("Latitud_sismo"),
+        "Longitud_sismo": evento.get("Longitud_sismo"),
+        "Profundidad": evento.get("Profundidad"),
+        "magnitud": evento.get("magnitud"),
+        "mag_type": evento.get("mag_type"),
+        "Fuente_informe": evento.get("Fuente_informe"),
+        "FechaHora": evento.get("FechaHora"),
+        "Referencia": evento.get("Referencia"),
+        "min_magnitud_usada": evento.get("min_magnitud_usada"),
+    }
+
+
+# -------------------------
 # Endpoints
 # -------------------------
 @app.get("/", response_class=HTMLResponse)
@@ -701,9 +739,6 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
                 .replace("<", "&lt;")
                 .replace(">", "&gt;")
     )
-
-    dc = float(evento.get("distancia_critica_km", float("nan")))
-    dc_txt = f"{dc:.1f} km" if not np.isnan(dc) else "No disponible"
 
     html = f"""
     <html>
@@ -748,6 +783,38 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
     return HTMLResponse(content=html, status_code=200)
 
 
+# ✅ Endpoint “Worker-friendly” (opción B)
+@app.get("/alerta/v1")
+def alerta_v1(
+    min_mag: float = Query(MIN_EVENT_MAGNITUDE, ge=0, le=10),
+    min_int: int = Query(MIN_INTENSITY_TO_SHOW, ge=0, le=12),
+    top: int = Query(ALERTA_TOP_DEFAULT, ge=0, le=20000),
+):
+    """
+    Devuelve JSON con:
+      - evento (incluye id si existe, y event_uid de respaldo)
+      - lista de localidades con intensidades predichas
+    ❌ No expone distancia crítica (es interna).
+    """
+    evento = fetch_latest_event(min_mag)
+    preds, _ = predict_intensidades(evento, min_int)
+
+    payload = {
+        "version": "v1",
+        "generated_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        "config": {
+            "min_event_magnitude": float(min_mag),
+            "min_intensity_to_show": int(min_int),
+            "top": int(top),
+        },
+        "evento": evento_publico(evento),
+        "count": len(preds),
+        "localidades": preds[:top] if top > 0 else preds,
+    }
+    return JSONResponse(payload)
+
+
+# (opcional) Mantengo este endpoint para debugging/backward-compat, también SIN distancia crítica
 @app.get("/intensidades/json")
 def intensidades_json():
     evento = fetch_latest_event(MIN_EVENT_MAGNITUDE)
@@ -758,13 +825,12 @@ def intensidades_json():
                 "MIN_EVENT_MAGNITUDE": MIN_EVENT_MAGNITUDE,
                 "MIN_INTENSITY_TO_SHOW": MIN_INTENSITY_TO_SHOW,
             },
-            "evento": evento,
+            "evento": evento_publico(evento),
             "csv": CSV_PATH,
             "modelo_local": MODEL_PATH,
             "modelo_url": MODEL_URL,
             "features_orden": order,
             "cantidad_localidades_int_ge_min": len(preds),
-            "distancia_critica_km": evento.get("distancia_critica_km"),
             "resultados": preds,
         }
     )
