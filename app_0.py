@@ -722,7 +722,7 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
           <li><b>Profundidad (km):</b> {evento["Profundidad"]}</li>
           <li><b>Magnitud:</b> {evento["magnitud"]} ({evento.get("mag_type","")})</li>
           <li><b>Referencia:</b> {evento.get("Referencia") or "No disponible"}</li>
-          <li><b>Distancia crítica (dc):</b> {dc_txt}</li>
+          <!-- <li><b>Distancia crítica (dc):</b> {dc_txt}</li> -->
         </ul>
 
         <div style="margin: 10px 0 18px 0;">
