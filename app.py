@@ -804,28 +804,9 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
           <b>Fuente:</b> <a href="https://www.sismologia.cl/" target="_blank">https://www.sismologia.cl/</a>
         </div>
 
-        <h2>Intensidades Mercalli estimadas iguales o mayores a {MIN_INTENSITY_TO_SHOW}</h2>
+       <h2>Intensidades Mercalli estimadas iguales o mayores a {MIN_INTENSITY_TO_SHOW}</h2>
+{table_html}
 
-        <!-- ✅ Tabla a la izquierda + imagen Mercalli a la derecha -->
-        <div style="display:flex; gap:18px; align-items:flex-start; flex-wrap:wrap;">
-
-          <!-- Columna izquierda: tabla -->
-          <div style="flex: 1 1 640px; min-width: 520px;">
-            {table_html}
-          </div>
-
-          <!-- Columna derecha: imagen Mercalli -->
-          <div style="flex: 0 1 420px; min-width: 320px;">
-            <div style="font-weight:600; margin-bottom:8px;">Escala de Mercalli (MMI)</div>
-            <img
-              src="/static/mercalli_mmi.jpg?v={MERCALLI_VERSION}"
-              alt="Escala de Mercalli Modificada (MMI)"
-              style="width:100%; height:auto; border-radius:12px; border:1px solid #eee;"
-              loading="lazy"
-            />
-          </div>
-
-        </div>
 
         <h2 style="margin-top: 24px;">Mapa (Epicentro + localidades)</h2>
         <div style="margin: 6px 0 12px 0; color:#333;">
