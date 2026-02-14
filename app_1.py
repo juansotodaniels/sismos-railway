@@ -48,6 +48,9 @@ MODEL_URL = os.getenv(
 # ✅ Para bustear caché del logo: cambia el valor cuando reemplaces /static/logo.png
 LOGO_VERSION = "20260203"
 
+# ✅ Para bustear caché de la imagen Mercalli (opcional): cambia si reemplazas /static/mercalli_mmi.jpg
+MERCALLI_VERSION = os.getenv("MERCALLI_VERSION", "20260214")
+
 app = FastAPI(title="YATI — Predicción de Intensidad Sísmica (RF)")
 
 # ✅ CORS (útil para Cloudflare Worker u otros consumidores)
@@ -59,7 +62,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ✅ Servir /static (para logo.png)
+# ✅ Servir /static (para logo.png y mercalli_mmi.jpg)
 if os.path.isdir("static"):
     app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -288,6 +291,7 @@ def read_localidades(csv_path: str) -> list[dict]:
                 for i, col in enumerate(fields_lower):
                     if cand in col:
                         return fields[i]
+                # continue outer
             return None
 
         lat_col = find_col_contains(["lat", "latitude", "latitud"])
@@ -328,10 +332,6 @@ def read_localidades(csv_path: str) -> list[dict]:
 
 # -------------------------
 # API XOR: último sismo >= magnitud mínima, dentro de las últimas 48 horas
-#   ✅ Usa SOLO la referencia geográfica del JSON
-#   ✅ Incluye id del evento (si existe)
-#   ✅ Calcula distancia crítica (INTERNA) para filtrar intensidades
-#   ❌ NO publica distancia crítica
 # -------------------------
 def fetch_latest_event(min_mag: float = MIN_EVENT_MAGNITUDE) -> dict:
     resp = requests.get(XOR_API_URL, headers=HEADERS, timeout=HTTP_TIMEOUT)
@@ -361,7 +361,6 @@ def fetch_latest_event(min_mag: float = MIN_EVENT_MAGNITUDE) -> dict:
         if not isinstance(ev, dict):
             continue
 
-        # ✅ id del evento (si existe)
         event_id = safe_get(ev, ["id", "event_id", "eqid", "publicid", "eventId", "eventID"])
 
         mag_raw, mag_unit = extract_magnitude(ev)
@@ -391,16 +390,12 @@ def fetch_latest_event(min_mag: float = MIN_EVENT_MAGNITUDE) -> dict:
         if dt_obj is not None and dt_obj < cutoff:
             continue
 
-        # ✅ distancia crítica INTERNA
         dc_km = distancia_critica_km(mag_f)
-
-        # ✅ uid de respaldo (por si id viene vacío)
         event_uid = f"{fecha_str}|{lat_f}|{lon_f}|{mag_f}|{depth_f}"
 
         return {
             "id": str(event_id) if event_id is not None else None,
             "event_uid": event_uid,
-
             "Latitud_sismo": lat_f,
             "Longitud_sismo": lon_f,
             "Profundidad": depth_f,
@@ -410,14 +405,10 @@ def fetch_latest_event(min_mag: float = MIN_EVENT_MAGNITUDE) -> dict:
             "FechaHora": fecha_str,
             "Referencia": geo_ref,
             "min_magnitud_usada": float(min_mag),
-
-            # 👇 interno (NO publicar)
-            "_dc_km": float(dc_km),
+            "_dc_km": float(dc_km),  # interno
         }
 
-    raise RuntimeError(
-        f"No se encontró un sismo con magnitud >= {min_mag} en las últimas 48 horas."
-    )
+    raise RuntimeError(f"No se encontró un sismo con magnitud >= {min_mag} en las últimas 48 horas.")
 
 
 # -------------------------
@@ -505,7 +496,6 @@ def predict_intensidades(evento: dict, min_intensity: int = MIN_INTENSITY_TO_SHO
     model = load_model()
     y_pred = model.predict(X)
 
-    # ✅ distancia crítica SOLO interna
     dc = float(evento.get("_dc_km", float("inf")))
 
     out = []
@@ -513,7 +503,6 @@ def predict_intensidades(evento: dict, min_intensity: int = MIN_INTENSITY_TO_SHO
         dist_km = float(m.get("distancia_epicentro_km_float", m["distancia_epicentro_km"]))
         intensidad = round_intensity(y_pred[i])
 
-        # ✅ corte interno por distancia crítica
         if dist_km > dc:
             intensidad = 0
 
@@ -622,7 +611,6 @@ def build_map_html(evento: dict, preds: list[dict], n: int) -> str:
         f"</div>"
     )
 
-    # ❌ NO mostramos distancia crítica en tooltip ni popup
     folium.Marker(
         location=[lat_s, lon_s],
         tooltip=folium.Tooltip(tooltip_html, sticky=True),
@@ -764,6 +752,16 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
         </div>
 
         <h2>Intensidades Mercalli estimadas iguales o mayores a {MIN_INTENSITY_TO_SHOW}</h2>
+
+        <!-- Botón info Mercalli (Modal) -->
+        <div style="margin: 6px 0 14px 0;">
+          <button onclick="openMercalli()" style="
+            border:1px solid #ddd; background:#fafafa; padding:10px 12px; border-radius:10px;
+            cursor:pointer; font-weight:600;">
+            ℹ️ ¿Qué significa la escala Mercalli?
+          </button>
+        </div>
+
         {table_html}
 
         <h2 style="margin-top: 24px;">Mapa (Epicentro + localidades)</h2>
@@ -776,6 +774,75 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
           style="width:100%; height:650px; border:0; border-radius:10px;"
           loading="lazy"
         ></iframe>
+
+        <!-- Modal Mercalli -->
+        <div id="mercalliModal" style="
+          display:none; position:fixed; inset:0; background:rgba(0,0,0,0.45);
+          padding:16px; z-index:9999;">
+          <div style="
+            max-width:820px; margin:40px auto; background:#fff; border-radius:14px;
+            padding:16px; box-shadow:0 10px 30px rgba(0,0,0,0.25);">
+
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:10px;">
+              <div style="font-size:18px; font-weight:700;">Escala Mercalli (MMI): ¿qué significan los números?</div>
+              <button onclick="closeMercalli()" style="
+                border:0; background:#f2f2f2; border-radius:10px; padding:8px 10px; cursor:pointer;">
+                ✕
+              </button>
+            </div>
+
+            <div style="margin-top:10px; color:#333; line-height:1.35;">
+              La intensidad (Mercalli) describe <b>cómo se siente</b> un sismo en la superficie y sus <b>efectos</b>.
+              (En YATI, es una estimación por localidad).
+            </div>
+
+            <div style="display:flex; gap:14px; margin-top:12px; flex-wrap:wrap;">
+              <!-- Tabla resumida -->
+              <div style="flex:1 1 360px; min-width:300px;">
+                <table border="1" cellpadding="6" cellspacing="0"
+                       style="border-collapse:collapse; width:100%; font-size:14px;">
+                  <thead>
+                    <tr><th style="width:70px;">MMI</th><th>Descripción (resumen)</th></tr>
+                  </thead>
+                  <tbody>
+                    <tr><td style="text-align:center;"><b>I–II</b></td><td>No sentido / apenas perceptible.</td></tr>
+                    <tr><td style="text-align:center;"><b>III</b></td><td>Leve; se siente en interiores, vibración suave.</td></tr>
+                    <tr><td style="text-align:center;"><b>IV</b></td><td>Moderado; ventanas/puertas vibran, se nota claramente.</td></tr>
+                    <tr><td style="text-align:center;"><b>V</b></td><td>Fuerte; objetos pequeños pueden caer, muchos lo sienten.</td></tr>
+                    <tr><td style="text-align:center;"><b>VI</b></td><td>Muy fuerte; movimiento evidente, daños leves posibles.</td></tr>
+                    <tr><td style="text-align:center;"><b>VII+</b></td><td>Daños moderados a severos (según construcción).</td></tr>
+                  </tbody>
+                </table>
+
+                <div style="margin-top:8px; font-size:12px; color:#555;">
+                  Nota: el daño real depende del tipo de suelo y calidad constructiva.
+                </div>
+              </div>
+
+              <!-- Imagen (opcional) -->
+              <div style="flex:0 1 360px; min-width:280px;">
+                <div style="font-weight:700; margin-bottom:6px;">Referencia visual</div>
+                <img
+                  src="/static/mercalli_mmi.jpg?v={MERCALLI_VERSION}"
+                  alt="Escala Mercalli"
+                  style="width:100%; height:auto; border:1px solid #ddd; border-radius:12px;"
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <script>
+          function openMercalli() {{
+            document.getElementById('mercalliModal').style.display = 'block';
+          }}
+          function closeMercalli() {{
+            document.getElementById('mercalliModal').style.display = 'none';
+          }}
+          document.getElementById('mercalliModal').addEventListener('click', function(e) {{
+            if (e.target.id === 'mercalliModal') closeMercalli();
+          }});
+        </script>
 
       </body>
     </html>
@@ -898,3 +965,4 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8000"))
     uvicorn.run("app:app", host="0.0.0.0", port=port)
+
