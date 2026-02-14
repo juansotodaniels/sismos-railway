@@ -48,6 +48,9 @@ MODEL_URL = os.getenv(
 # ✅ Para bustear caché del logo: cambia el valor cuando reemplaces /static/logo.png
 LOGO_VERSION = "20260203"
 
+# ✅ Para bustear caché de la imagen Mercalli: cambia el valor cuando reemplaces /static/mercalli_mmi.jpg
+MERCALLI_VERSION = "20260214"
+
 app = FastAPI(title="YATI — Predicción de Intensidad Sísmica (RF)")
 
 # ✅ CORS (útil para Cloudflare Worker u otros consumidores)
@@ -59,7 +62,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ✅ Servir /static (para logo.png)
+# ✅ Servir /static (para logo.png y mercalli_mmi.jpg)
 if os.path.isdir("static"):
     app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -574,7 +577,8 @@ def render_table(preds: list[dict], n: int) -> str:
         for i, x in enumerate(show)
     )
     return f"""
-      <table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;">
+      <table border="1" cellpadding="6" cellspacing="0"
+             style="border-collapse: collapse; width: 100%; max-width: 720px; font-size:14px;">
         <thead>
           <tr>
             <th>#</th>
@@ -764,7 +768,27 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
         </div>
 
         <h2>Intensidades Mercalli estimadas iguales o mayores a {MIN_INTENSITY_TO_SHOW}</h2>
-        {table_html}
+
+        <!-- ✅ Tabla a la izquierda + imagen Mercalli a la derecha -->
+        <div style="display:flex; gap:18px; align-items:flex-start; flex-wrap:wrap;">
+
+          <!-- Columna izquierda: tabla -->
+          <div style="flex: 1 1 640px; min-width: 520px;">
+            {table_html}
+          </div>
+
+          <!-- Columna derecha: imagen Mercalli -->
+          <div style="flex: 0 1 420px; min-width: 320px;">
+            <div style="font-weight:600; margin-bottom:8px;">Escala de Mercalli (MMI)</div>
+            <img
+              src="/static/mercalli_mmi.jpg?v={MERCALLI_VERSION}"
+              alt="Escala de Mercalli Modificada (MMI)"
+              style="width:100%; height:auto; border-radius:12px; border:1px solid #eee;"
+              loading="lazy"
+            />
+          </div>
+
+        </div>
 
         <h2 style="margin-top: 24px;">Mapa (Epicentro + localidades)</h2>
         <div style="margin: 6px 0 12px 0; color:#333;">
@@ -898,4 +922,3 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8000"))
     uvicorn.run("app:app", host="0.0.0.0", port=port)
-
