@@ -760,7 +760,7 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
         <!-- Botón info Mercalli (Modal) -->
         <div style="margin: 6px 0 14px 0;">
           <button onclick="openMercalli()" style="
-            border:1px solid #ddd; background:#fafafa; padding:10px 12px; border-radius:10px;
+            border:1px solid #ddd; background:#fff; padding:10px 12px; border-radius:10px;
             cursor:pointer; font-weight:600;">
             <span style="color:#f57c00; font-weight:800;">!</span>
             <span style="margin-left:6px;">¿Qué significa la escala Mercalli?</span>
