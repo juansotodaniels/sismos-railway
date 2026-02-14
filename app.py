@@ -331,10 +331,6 @@ def read_localidades(csv_path: str) -> list[dict]:
 
 # -------------------------
 # API XOR: último sismo >= magnitud mínima, dentro de las últimas 48 horas
-#   ✅ Usa SOLO la referencia geográfica del JSON
-#   ✅ Incluye id del evento (si existe)
-#   ✅ Calcula distancia crítica (INTERNA) para filtrar intensidades
-#   ❌ NO publica distancia crítica
 # -------------------------
 def fetch_latest_event(min_mag: float = MIN_EVENT_MAGNITUDE) -> dict:
     resp = requests.get(XOR_API_URL, headers=HEADERS, timeout=HTTP_TIMEOUT)
@@ -364,7 +360,6 @@ def fetch_latest_event(min_mag: float = MIN_EVENT_MAGNITUDE) -> dict:
         if not isinstance(ev, dict):
             continue
 
-        # ✅ id del evento (si existe)
         event_id = safe_get(ev, ["id", "event_id", "eqid", "publicid", "eventId", "eventID"])
 
         mag_raw, mag_unit = extract_magnitude(ev)
@@ -394,16 +389,12 @@ def fetch_latest_event(min_mag: float = MIN_EVENT_MAGNITUDE) -> dict:
         if dt_obj is not None and dt_obj < cutoff:
             continue
 
-        # ✅ distancia crítica INTERNA
         dc_km = distancia_critica_km(mag_f)
-
-        # ✅ uid de respaldo (por si id viene vacío)
         event_uid = f"{fecha_str}|{lat_f}|{lon_f}|{mag_f}|{depth_f}"
 
         return {
             "id": str(event_id) if event_id is not None else None,
             "event_uid": event_uid,
-
             "Latitud_sismo": lat_f,
             "Longitud_sismo": lon_f,
             "Profundidad": depth_f,
@@ -413,14 +404,10 @@ def fetch_latest_event(min_mag: float = MIN_EVENT_MAGNITUDE) -> dict:
             "FechaHora": fecha_str,
             "Referencia": geo_ref,
             "min_magnitud_usada": float(min_mag),
-
-            # 👇 interno (NO publicar)
-            "_dc_km": float(dc_km),
+            "_dc_km": float(dc_km),  # interno
         }
 
-    raise RuntimeError(
-        f"No se encontró un sismo con magnitud >= {min_mag} en las últimas 48 horas."
-    )
+    raise RuntimeError(f"No se encontró un sismo con magnitud >= {min_mag} en las últimas 48 horas.")
 
 
 # -------------------------
@@ -508,7 +495,6 @@ def predict_intensidades(evento: dict, min_intensity: int = MIN_INTENSITY_TO_SHO
     model = load_model()
     y_pred = model.predict(X)
 
-    # ✅ distancia crítica SOLO interna
     dc = float(evento.get("_dc_km", float("inf")))
 
     out = []
@@ -516,7 +502,6 @@ def predict_intensidades(evento: dict, min_intensity: int = MIN_INTENSITY_TO_SHO
         dist_km = float(m.get("distancia_epicentro_km_float", m["distancia_epicentro_km"]))
         intensidad = round_intensity(y_pred[i])
 
-        # ✅ corte interno por distancia crítica
         if dist_km > dc:
             intensidad = 0
 
@@ -626,7 +611,6 @@ def build_map_html(evento: dict, preds: list[dict], n: int) -> str:
         f"</div>"
     )
 
-    # ❌ NO mostramos distancia crítica en tooltip ni popup
     folium.Marker(
         location=[lat_s, lon_s],
         tooltip=folium.Tooltip(tooltip_html, sticky=True),
@@ -665,278 +649,4 @@ def build_map_html(evento: dict, preds: list[dict], n: int) -> str:
             location=[lat, lon],
             radius=intensity_radius(i),
             color=col,
-            fill=True,
-            fill_color=col,
-            fill_opacity=0.55,
-            weight=2,
-            popup=folium.Popup(popup, max_width=320),
-            tooltip=f"{x['localidad']} (I={i})",
-        ).add_to(m)
-
-        bounds.append([lat, lon])
-
-    if len(bounds) >= 2:
-        m.fit_bounds(bounds, padding=(20, 20))
-
-    return m.get_root().render()
-
-
-# -------------------------
-# Helpers de "salida pública" (NO incluye _dc_km)
-# -------------------------
-def evento_publico(evento: dict) -> dict:
-    return {
-        "id": evento.get("id"),
-        "event_uid": evento.get("event_uid"),
-        "Latitud_sismo": evento.get("Latitud_sismo"),
-        "Longitud_sismo": evento.get("Longitud_sismo"),
-        "Profundidad": evento.get("Profundidad"),
-        "magnitud": evento.get("magnitud"),
-        "mag_type": evento.get("mag_type"),
-        "Fuente_informe": evento.get("Fuente_informe"),
-        "FechaHora": evento.get("FechaHora"),
-        "Referencia": evento.get("Referencia"),
-        "min_magnitud_usada": evento.get("min_magnitud_usada"),
-    }
-
-
-# -------------------------
-# Endpoints
-# -------------------------
-@app.get("/", response_class=HTMLResponse)
-def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
-    """
-    HOME:
-      - si hay sismo >= MIN_EVENT_MAGNITUDE (y dentro de 48h): muestra resultados
-      - si NO hay: muestra mensaje amigable (sin error y sin link /health)
-    """
-    try:
-        evento = fetch_latest_event(MIN_EVENT_MAGNITUDE)
-    except Exception:
-        msg = (
-            f"No se han encontrado sismos de magnitudes mayores o iguales a "
-            f"{MIN_EVENT_MAGNITUDE:.1f} en las ultimas 48 horas."
-        )
-        html = f"""
-        <html>
-          <head>
-            <meta charset="utf-8">
-            <title>YATI</title>
-          </head>
-          <body style="font-family: Arial, sans-serif; padding: 24px;">
-            {render_header_html()}
-            <div style="padding:18px; border:1px solid #ddd; background:#fafafa; border-radius:12px;">
-              <div style="font-size:18px;"><b>{msg}</b></div>
-            </div>
-          </body>
-        </html>
-        """
-        return HTMLResponse(content=html, status_code=200)
-
-    preds, order = predict_intensidades(evento, MIN_INTENSITY_TO_SHOW)
-    table_html = render_table(preds, n)
-
-    map_html = build_map_html(evento, preds, n)
-    srcdoc = (
-        map_html.replace("&", "&amp;")
-                .replace('"', "&quot;")
-                .replace("<", "&lt;")
-                .replace(">", "&gt;")
-    )
-
-    html = f"""
-    <html>
-      <head>
-        <meta charset="utf-8">
-        <title>YATI</title>
-      </head>
-      <body style="font-family: Arial, sans-serif; padding: 24px;">
-        {render_header_html()}
-
-        <!-- Bloque superior: info sismo + imagen Mercalli -->
-<div style="display:flex; justify-content:space-between; align-items:flex-start; gap:24px; flex-wrap:wrap;">
-
-  <!-- Columna izquierda: información del sismo -->
-  <div style="flex:1 1 600px; min-width:420px;">
-    <h2>Último sismo de magnitud igual o mayor a {MIN_EVENT_MAGNITUDE} en 48 hrs.</h2>
-    <ul>
-      <li><b>Fecha/Hora:</b> {evento.get("FechaHora","No disponible")}</li>
-      <li><b>Latitud_sismo:</b> {evento["Latitud_sismo"]}</li>
-      <li><b>Longitud_sismo:</b> {evento["Longitud_sismo"]}</li>
-      <li><b>Profundidad (km):</b> {evento["Profundidad"]}</li>
-      <li><b>Magnitud:</b> {evento["magnitud"]} ({evento.get("mag_type","")})</li>
-      <li><b>Referencia:</b> {evento.get("Referencia") or "No disponible"}</li>
-    </ul>
-
-    <div style="margin: 10px 0 18px 0;">
-      <b>Fuente:</b> 
-      <a href="https://www.sismologia.cl/" target="_blank">
-        https://www.sismologia.cl/
-      </a>
-    </div>
-  </div>
-
-  <!-- Columna derecha: imagen Mercalli pequeña -->
-  <div style="flex:0 0 260px;">
-    <div style="font-weight:600; margin-bottom:8px; text-align:center;">
-      Escala Mercalli (MMI)
-    </div>
-    <img
-      src="/static/mercalli_mmi.jpg?v={MERCALLI_VERSION}"
-      alt="Escala de Mercalli Modificada (MMI)"
-      style="width:100%; height:auto; border-radius:10px; border:1px solid #ddd;"
-      loading="lazy"
-    />
-  </div>
-
-</div>
-
-        <ul>
-          <li><b>Fecha/Hora:</b> {evento.get("FechaHora","No disponible")}</li>
-          <li><b>Latitud_sismo:</b> {evento["Latitud_sismo"]}</li>
-          <li><b>Longitud_sismo:</b> {evento["Longitud_sismo"]}</li>
-          <li><b>Profundidad (km):</b> {evento["Profundidad"]}</li>
-          <li><b>Magnitud:</b> {evento["magnitud"]} ({evento.get("mag_type","")})</li>
-          <li><b>Referencia:</b> {evento.get("Referencia") or "No disponible"}</li>
-        </ul>
-
-        <div style="margin: 10px 0 18px 0;">
-          <b>Fuente:</b> <a href="https://www.sismologia.cl/" target="_blank">https://www.sismologia.cl/</a>
-        </div>
-
-       <h2>Intensidades Mercalli estimadas iguales o mayores a {MIN_INTENSITY_TO_SHOW}</h2>
-{table_html}
-
-
-        <h2 style="margin-top: 24px;">Mapa (Epicentro + localidades)</h2>
-        <div style="margin: 6px 0 12px 0; color:#333;">
-          El tamaño del círculo es proporcional a la intensidad y el color depende del rango.
-        </div>
-
-        <iframe
-          srcdoc="{srcdoc}"
-          style="width:100%; height:650px; border:0; border-radius:10px;"
-          loading="lazy"
-        ></iframe>
-
-      </body>
-    </html>
-    """
-    return HTMLResponse(content=html, status_code=200)
-
-
-# ✅ Endpoint “Worker-friendly” (opción B)
-@app.get("/alerta/v1")
-def alerta_v1(
-    min_mag: float = Query(MIN_EVENT_MAGNITUDE, ge=0, le=10),
-    min_int: int = Query(MIN_INTENSITY_TO_SHOW, ge=0, le=12),
-    top: int = Query(ALERTA_TOP_DEFAULT, ge=0, le=20000),
-):
-    """
-    Devuelve JSON con:
-      - evento (incluye id si existe, y event_uid de respaldo)
-      - lista de localidades con intensidades predichas
-    ❌ No expone distancia crítica (es interna).
-    """
-    evento = fetch_latest_event(min_mag)
-    preds, _ = predict_intensidades(evento, min_int)
-
-    payload = {
-        "version": "v1",
-        "generated_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-        "config": {
-            "min_event_magnitude": float(min_mag),
-            "min_intensity_to_show": int(min_int),
-            "top": int(top),
-        },
-        "evento": evento_publico(evento),
-        "count": len(preds),
-        "localidades": preds[:top] if top > 0 else preds,
-    }
-    return JSONResponse(payload)
-
-
-# (opcional) Mantengo este endpoint para debugging/backward-compat, también SIN distancia crítica
-@app.get("/intensidades/json")
-def intensidades_json():
-    evento = fetch_latest_event(MIN_EVENT_MAGNITUDE)
-    preds, order = predict_intensidades(evento, MIN_INTENSITY_TO_SHOW)
-    return JSONResponse(
-        {
-            "config": {
-                "MIN_EVENT_MAGNITUDE": MIN_EVENT_MAGNITUDE,
-                "MIN_INTENSITY_TO_SHOW": MIN_INTENSITY_TO_SHOW,
-            },
-            "evento": evento_publico(evento),
-            "csv": CSV_PATH,
-            "modelo_local": MODEL_PATH,
-            "modelo_url": MODEL_URL,
-            "features_orden": order,
-            "cantidad_localidades_int_ge_min": len(preds),
-            "resultados": preds,
-        }
-    )
-
-
-@app.get("/health")
-def health():
-    status = {
-        "csv_exists": os.path.exists(CSV_PATH),
-        "csv_path": CSV_PATH,
-        "model_exists": os.path.exists(MODEL_PATH),
-        "model_path": MODEL_PATH,
-        "model_url": MODEL_URL,
-        "XOR_API_URL": XOR_API_URL,
-        "MIN_EVENT_MAGNITUDE": MIN_EVENT_MAGNITUDE,
-        "MIN_INTENSITY_TO_SHOW": MIN_INTENSITY_TO_SHOW,
-        "PRELOAD_MODEL_ON_STARTUP": PRELOAD_MODEL_ON_STARTUP,
-        "DEFAULT_TABLE_ROWS": DEFAULT_TABLE_ROWS,
-    }
-    if status["model_exists"]:
-        status["model_size_mb"] = round(os.path.getsize(MODEL_PATH) / (1024 * 1024), 2)
-
-    try:
-        r = requests.get(XOR_API_URL, headers=HEADERS, timeout=HTTP_TIMEOUT)
-        status["api_ok"] = r.ok
-        status["api_status_code"] = r.status_code
-    except Exception as e:
-        status["api_ok"] = False
-        status["api_error"] = str(e)
-
-    try:
-        _ = load_model()
-        status["model_load_ok"] = True
-    except Exception as e:
-        status["model_load_ok"] = False
-        status["model_load_error"] = str(e)
-
-    return JSONResponse(status)
-
-
-@app.get("/debug/xor")
-def debug_xor(limit: int = Query(3, ge=1, le=20)):
-    r = requests.get(XOR_API_URL, headers=HEADERS, timeout=HTTP_TIMEOUT)
-    r.raise_for_status()
-    data = r.json()
-
-    if isinstance(data, list):
-        return JSONResponse({"type": "list", "sample": data[:limit]})
-
-    if isinstance(data, dict):
-        events = (
-            safe_get(data, ["data"]) or
-            safe_get(data, ["events"]) or
-            safe_get(data, ["result"]) or
-            safe_get(data, ["results"])
-        )
-        if isinstance(events, list):
-            return JSONResponse({"type": "dict+list", "keys": list(data.keys()), "sample": events[:limit]})
-        return JSONResponse({"type": "dict", "keys": list(data.keys()), "data": data})
-
-    return JSONResponse({"type": str(type(data))})
-
-
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.getenv("PORT", "8000"))
-    uvicorn.run("app:app", host="0.0.0.0", port=port)
+)
