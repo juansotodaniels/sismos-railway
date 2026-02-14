@@ -753,7 +753,44 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
       <body style="font-family: Arial, sans-serif; padding: 24px;">
         {render_header_html()}
 
-        <h2>Último sismo de magnitud igual o mayor a {MIN_EVENT_MAGNITUDE} en 48 hrs.</h2>
+        <!-- Bloque superior: info sismo + imagen Mercalli -->
+<div style="display:flex; justify-content:space-between; align-items:flex-start; gap:24px; flex-wrap:wrap;">
+
+  <!-- Columna izquierda: información del sismo -->
+  <div style="flex:1 1 600px; min-width:420px;">
+    <h2>Último sismo de magnitud igual o mayor a {MIN_EVENT_MAGNITUDE} en 48 hrs.</h2>
+    <ul>
+      <li><b>Fecha/Hora:</b> {evento.get("FechaHora","No disponible")}</li>
+      <li><b>Latitud_sismo:</b> {evento["Latitud_sismo"]}</li>
+      <li><b>Longitud_sismo:</b> {evento["Longitud_sismo"]}</li>
+      <li><b>Profundidad (km):</b> {evento["Profundidad"]}</li>
+      <li><b>Magnitud:</b> {evento["magnitud"]} ({evento.get("mag_type","")})</li>
+      <li><b>Referencia:</b> {evento.get("Referencia") or "No disponible"}</li>
+    </ul>
+
+    <div style="margin: 10px 0 18px 0;">
+      <b>Fuente:</b> 
+      <a href="https://www.sismologia.cl/" target="_blank">
+        https://www.sismologia.cl/
+      </a>
+    </div>
+  </div>
+
+  <!-- Columna derecha: imagen Mercalli pequeña -->
+  <div style="flex:0 0 260px;">
+    <div style="font-weight:600; margin-bottom:8px; text-align:center;">
+      Escala Mercalli (MMI)
+    </div>
+    <img
+      src="/static/mercalli_mmi.jpg?v={MERCALLI_VERSION}"
+      alt="Escala de Mercalli Modificada (MMI)"
+      style="width:100%; height:auto; border-radius:10px; border:1px solid #ddd;"
+      loading="lazy"
+    />
+  </div>
+
+</div>
+
         <ul>
           <li><b>Fecha/Hora:</b> {evento.get("FechaHora","No disponible")}</li>
           <li><b>Latitud_sismo:</b> {evento["Latitud_sismo"]}</li>
