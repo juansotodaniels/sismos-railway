@@ -291,7 +291,6 @@ def read_localidades(csv_path: str) -> list[dict]:
                 for i, col in enumerate(fields_lower):
                     if cand in col:
                         return fields[i]
-                # continue outer
             return None
 
         lat_col = find_col_contains(["lat", "latitude", "latitud"])
@@ -396,6 +395,7 @@ def fetch_latest_event(min_mag: float = MIN_EVENT_MAGNITUDE) -> dict:
         return {
             "id": str(event_id) if event_id is not None else None,
             "event_uid": event_uid,
+
             "Latitud_sismo": lat_f,
             "Longitud_sismo": lon_f,
             "Profundidad": depth_f,
@@ -405,10 +405,14 @@ def fetch_latest_event(min_mag: float = MIN_EVENT_MAGNITUDE) -> dict:
             "FechaHora": fecha_str,
             "Referencia": geo_ref,
             "min_magnitud_usada": float(min_mag),
-            "_dc_km": float(dc_km),  # interno
+
+            # interno
+            "_dc_km": float(dc_km),
         }
 
-    raise RuntimeError(f"No se encontró un sismo con magnitud >= {min_mag} en las últimas 48 horas.")
+    raise RuntimeError(
+        f"No se encontró un sismo con magnitud >= {min_mag} en las últimas 48 horas."
+    )
 
 
 # -------------------------
@@ -758,7 +762,8 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
           <button onclick="openMercalli()" style="
             border:1px solid #ddd; background:#fafafa; padding:10px 12px; border-radius:10px;
             cursor:pointer; font-weight:600;">
-            ℹ️ ¿Qué significa la escala Mercalli?
+            <span style="color:#f57c00; font-weight:800;">!</span>
+            <span style="margin-left:6px;">¿Qué significa la escala Mercalli?</span>
           </button>
         </div>
 
@@ -819,7 +824,7 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
                 </div>
               </div>
 
-              <!-- Imagen (opcional) -->
+              <!-- Imagen -->
               <div style="flex:0 1 360px; min-width:280px;">
                 <div style="font-weight:700; margin-bottom:6px;">Referencia visual</div>
                 <img
