@@ -1,3 +1,25 @@
+# app.py — YATI (Railway) — versión con “snapshot HTML liviano”
+# Cambios principales:
+# 1) NO ejecutar el RandomForest en cada visita pública.
+#    - /            => sirve el HTML liviano (snapshot) desde disco (NO corre modelo)
+#    - /public      => alias del snapshot (NO corre modelo)
+# 2) Nuevo endpoint /build-public (protegido) para que el Worker lo llame SOLO cuando haya evento/alerta:
+#    - Calcula intensidades (RF) + genera mapa + genera HTML completo + guarda snapshot en /public/index.html
+# 3) /alerta/v1 se mantiene (worker-friendly) y sigue corriendo el modelo (solo lo usa el Worker)
+# 4) El HTML liviano mantiene el botón/modal Mercalli con la imagen /static/mercalli_mmi.jpg
+#
+# Variables nuevas recomendadas (Railway):
+# - PUBLIC_DIR="public"                    (default)
+# - ENABLE_BUILD_PUBLIC="1"                (para activar /build-public)
+# - BUILD_PUBLIC_TOKEN="un_token_largo"    (Bearer token requerido por /build-public)
+# - PUBLIC_TABLE_ROWS="200"                (filas para el snapshot)
+# - PUBLIC_MAP_HEIGHT="650"                (alto iframe mapa)
+#
+# Nota: Railway sirve archivos estáticos solo si los expones tú. Aquí lo servimos con FastAPI:
+#   app.mount("/public_static", StaticFiles(directory=PUBLIC_DIR), name="public_static")
+# y el snapshot queda accesible como /public_static/index.html
+# (y / y /public lo renderizan directamente desde archivo para evitar 404 si alguien entra “normal”.)
+
 import os
 import csv
 import math
@@ -10,17 +32,18 @@ import numpy as np
 import joblib
 import folium
 
-from fastapi import FastAPI, Query
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI, Query, Request, Header
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+
 
 # ============================================================
 # CONFIGURACIÓN (MODIFICABLE)
 # ============================================================
 MIN_EVENT_MAGNITUDE = float(os.getenv("MIN_EVENT_MAGNITUDE", "2"))          # evento: M >=
 MIN_INTENSITY_TO_SHOW = int(os.getenv("MIN_INTENSITY_TO_SHOW", "3"))        # mostrar: I >=
-DEFAULT_TABLE_ROWS = int(os.getenv("DEFAULT_TABLE_ROWS", "200"))            # filas mostradas en Home
+DEFAULT_TABLE_ROWS = int(os.getenv("DEFAULT_TABLE_ROWS", "200"))            # filas mostradas en JSON/otros
 
 PRELOAD_MODEL_ON_STARTUP = os.getenv("PRELOAD_MODEL_ON_STARTUP", "1") == "1"
 
@@ -29,6 +52,16 @@ MODEL_DOWNLOAD_TIMEOUT = int(os.getenv("MODEL_DOWNLOAD_TIMEOUT", "600"))
 
 # Para /alerta/v1: máximo de localidades enviadas por defecto (0 = todas)
 ALERTA_TOP_DEFAULT = int(os.getenv("ALERTA_TOP_DEFAULT", "200"))
+
+# ✅ Snapshot público (NO corre modelo al consultar)
+PUBLIC_DIR = os.getenv("PUBLIC_DIR", "public")
+PUBLIC_SNAPSHOT_PATH = os.path.join(PUBLIC_DIR, "index.html")
+PUBLIC_TABLE_ROWS = int(os.getenv("PUBLIC_TABLE_ROWS", str(DEFAULT_TABLE_ROWS)))
+PUBLIC_MAP_HEIGHT = int(os.getenv("PUBLIC_MAP_HEIGHT", "650"))
+
+# Endpoint protegido para construir snapshot
+ENABLE_BUILD_PUBLIC = os.getenv("ENABLE_BUILD_PUBLIC", "0") == "1"
+BUILD_PUBLIC_TOKEN = os.getenv("BUILD_PUBLIC_TOKEN", "")  # Bearer token
 # ============================================================
 
 # ✅ API XOR
@@ -65,6 +98,11 @@ app.add_middleware(
 # ✅ Servir /static (para logo.png y mercalli_mmi.jpg)
 if os.path.isdir("static"):
     app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# ✅ Servir snapshot público como archivo estático también (opcional)
+# Quedará accesible como: /public_static/index.html
+os.makedirs(PUBLIC_DIR, exist_ok=True)
+app.mount("/public_static", StaticFiles(directory=PUBLIC_DIR), name="public_static")
 
 
 # -------------------------
@@ -179,7 +217,7 @@ def distancia_critica_km(magnitud: float) -> float:
 # -------------------------
 def render_header_html() -> str:
     return f"""
-    <div style="display:flex; align-items:center; gap:18px; margin-bottom:18px;">
+    <div style="display:flex; align-items:center; gap:18px; margin-bottom:18px; flex-wrap:wrap;">
       <img src="/static/logo.png?v={LOGO_VERSION}" alt="logo" style="height:180px; width:auto;">
       <div>
         <h1 style="margin:0; font-size:56px; line-height:1;">
@@ -689,39 +727,9 @@ def evento_publico(evento: dict) -> dict:
 
 
 # -------------------------
-# Endpoints
+# Snapshot HTML: construir y guardar a disco (NO se ejecuta en cada visita)
 # -------------------------
-@app.get("/", response_class=HTMLResponse)
-def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
-    """
-    HOME:
-      - si hay sismo >= MIN_EVENT_MAGNITUDE (y dentro de 48h): muestra resultados
-      - si NO hay: muestra mensaje amigable (sin error y sin link /health)
-    """
-    try:
-        evento = fetch_latest_event(MIN_EVENT_MAGNITUDE)
-    except Exception:
-        msg = (
-            f"No se han encontrado sismos de magnitudes mayores o iguales a "
-            f"{MIN_EVENT_MAGNITUDE:.1f} en las ultimas 48 horas."
-        )
-        html = f"""
-        <html>
-          <head>
-            <meta charset="utf-8">
-            <title>YATI</title>
-          </head>
-          <body style="font-family: Arial, sans-serif; padding: 24px;">
-            {render_header_html()}
-            <div style="padding:18px; border:1px solid #ddd; background:#fafafa; border-radius:12px;">
-              <div style="font-size:18px;"><b>{msg}</b></div>
-            </div>
-          </body>
-        </html>
-        """
-        return HTMLResponse(content=html, status_code=200)
-
-    preds, order = predict_intensidades(evento, MIN_INTENSITY_TO_SHOW)
+def build_full_html(evento: dict, preds: list[dict], n: int) -> str:
     table_html = render_table(preds, n)
 
     map_html = build_map_html(evento, preds, n)
@@ -732,14 +740,21 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
                 .replace(">", "&gt;")
     )
 
+    generated_utc = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
     html = f"""
     <html>
       <head>
         <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>YATI</title>
       </head>
-      <body style="font-family: Arial, sans-serif; padding: 24px;">
+      <body style="font-family: Arial, sans-serif; padding: 18px; max-width: 1100px; margin:0 auto;">
         {render_header_html()}
+
+        <div style="margin: -4px 0 14px 0; color:#555; font-size:13px;">
+          <b>Última actualización (UTC):</b> {generated_utc}
+        </div>
 
         <h2>Último sismo de magnitud igual o mayor a {MIN_EVENT_MAGNITUDE} en 48 hrs.</h2>
         <ul>
@@ -778,7 +793,7 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
 
         <iframe
           srcdoc="{srcdoc}"
-          style="width:100%; height:650px; border:0; border-radius:10px;"
+          style="width:100%; height:{PUBLIC_MAP_HEIGHT}px; border:0; border-radius:10px;"
           loading="lazy"
         ></iframe>
 
@@ -854,10 +869,111 @@ def home(n: int = Query(DEFAULT_TABLE_ROWS, ge=1, le=20000)):
       </body>
     </html>
     """
-    return HTMLResponse(content=html, status_code=200)
+    return html
+
+def write_public_snapshot(html: str):
+    os.makedirs(PUBLIC_DIR, exist_ok=True)
+    tmp = PUBLIC_SNAPSHOT_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(html)
+    os.replace(tmp, PUBLIC_SNAPSHOT_PATH)
+    print(f"[PUBLIC] Snapshot actualizado: {PUBLIC_SNAPSHOT_PATH}")
 
 
-# ✅ Endpoint “Worker-friendly” (opción B)
+def read_public_snapshot() -> Optional[str]:
+    try:
+        if os.path.exists(PUBLIC_SNAPSHOT_PATH) and os.path.getsize(PUBLIC_SNAPSHOT_PATH) > 50:
+            with open(PUBLIC_SNAPSHOT_PATH, "r", encoding="utf-8", errors="replace") as f:
+                return f.read()
+    except Exception:
+        pass
+    return None
+
+
+# -------------------------
+# Endpoints
+# -------------------------
+
+# ✅ HOME ahora es LIVIANO: sirve snapshot (no ejecuta RF)
+@app.get("/", response_class=HTMLResponse)
+def home():
+    html = read_public_snapshot()
+    if html:
+        return HTMLResponse(content=html, status_code=200)
+
+    # si aún no hay snapshot, mostramos aviso
+    msg = (
+        "Aún no se ha generado el HTML público. "
+        "El Worker lo generará cuando haya un evento que dispare alerta, "
+        "o puedes generarlo manualmente llamando /build-public (protegido)."
+    )
+    html0 = f"""
+    <html>
+      <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>YATI</title></head>
+      <body style="font-family: Arial, sans-serif; padding: 18px;">
+        {render_header_html()}
+        <div style="padding:18px; border:1px solid #ddd; background:#fafafa; border-radius:12px;">
+          <div style="font-size:16px;"><b>{msg}</b></div>
+          <div style="margin-top:10px; font-size:13px; color:#555;">
+            Snapshot esperado en: <code>{PUBLIC_SNAPSHOT_PATH}</code><br>
+            Acceso directo al archivo: <code>/public_static/index.html</code>
+          </div>
+        </div>
+      </body>
+    </html>
+    """
+    return HTMLResponse(content=html0, status_code=200)
+
+# ✅ Alias liviano
+@app.get("/public", response_class=HTMLResponse)
+def public():
+    return home()
+
+
+# ✅ Endpoint protegido: genera snapshot (corre RF SOLO aquí)
+@app.get("/build-public")
+def build_public(
+    request: Request,
+    min_mag: float = Query(MIN_EVENT_MAGNITUDE, ge=0, le=10),
+    min_int: int = Query(MIN_INTENSITY_TO_SHOW, ge=0, le=12),
+    n: int = Query(PUBLIC_TABLE_ROWS, ge=1, le=20000),
+    authorization: Optional[str] = Header(default=None),
+):
+    if not ENABLE_BUILD_PUBLIC:
+        return PlainTextResponse("Not Found", status_code=404)
+
+    # Auth: Bearer <token>
+    token = ""
+    if authorization and isinstance(authorization, str) and authorization.lower().startswith("bearer "):
+        token = authorization.split(" ", 1)[1].strip()
+
+    if not BUILD_PUBLIC_TOKEN or token != BUILD_PUBLIC_TOKEN:
+        return PlainTextResponse("Unauthorized", status_code=401)
+
+    try:
+        evento = fetch_latest_event(min_mag)
+    except Exception as e:
+        return PlainTextResponse(f"No hay evento >= {min_mag} (48h). Detalle: {e}", status_code=200)
+
+    preds, _ = predict_intensidades(evento, min_int)
+    html = build_full_html(evento, preds, n)
+    write_public_snapshot(html)
+
+    return JSONResponse({
+        "ok": True,
+        "saved_to": PUBLIC_SNAPSHOT_PATH,
+        "public_url_hint": "/public",
+        "public_file_url_hint": "/public_static/index.html",
+        "generated_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        "evento": evento_publico(evento),
+        "count": len(preds),
+        "n": int(n),
+        "min_mag": float(min_mag),
+        "min_int": int(min_int),
+    })
+
+
+# ✅ Endpoint “Worker-friendly” (sigue corriendo modelo; lo llama el Worker)
 @app.get("/alerta/v1")
 def alerta_v1(
     min_mag: float = Query(MIN_EVENT_MAGNITUDE, ge=0, le=10),
@@ -923,6 +1039,9 @@ def health():
         "MIN_INTENSITY_TO_SHOW": MIN_INTENSITY_TO_SHOW,
         "PRELOAD_MODEL_ON_STARTUP": PRELOAD_MODEL_ON_STARTUP,
         "DEFAULT_TABLE_ROWS": DEFAULT_TABLE_ROWS,
+        "PUBLIC_DIR": PUBLIC_DIR,
+        "PUBLIC_SNAPSHOT_PATH": PUBLIC_SNAPSHOT_PATH,
+        "ENABLE_BUILD_PUBLIC": ENABLE_BUILD_PUBLIC,
     }
     if status["model_exists"]:
         status["model_size_mb"] = round(os.path.getsize(MODEL_PATH) / (1024 * 1024), 2)
@@ -972,4 +1091,3 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8000"))
     uvicorn.run("app:app", host="0.0.0.0", port=port)
-
